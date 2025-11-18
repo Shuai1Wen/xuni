@@ -45,6 +45,7 @@ class OperatorModel(nn.Module):
         n_response_bases: 响应基数量 K
         cond_dim: 条件向量维度
         hidden_dim: α_k和β_k网络的隐藏层维度
+        max_spectral_norm: 允许的最大谱范数（用于稳定性约束），默认1.05
 
     属性:
         A0_tissue: (n_tissues, d, d) 每个组织的基线算子 A_t^(0)
@@ -80,13 +81,15 @@ class OperatorModel(nn.Module):
         n_tissues: int,
         n_response_bases: int,
         cond_dim: int,
-        hidden_dim: int = 64
+        hidden_dim: int = 64,
+        max_spectral_norm: float = 1.05
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.n_tissues = n_tissues
         self.K = n_response_bases
         self.cond_dim = cond_dim
+        self.max_spectral_norm = max_spectral_norm
 
         # 每个组织的基线算子和偏置
         # A_t^(0)：组织特异的基线转移矩阵
@@ -272,6 +275,7 @@ class OperatorModel(nn.Module):
 
             # Power iteration 估计谱范数（最大奇异值）
             # 对 A^T A 进行power iteration
+            # 注意：v在no_grad上下文中计算，已经不带梯度
             with torch.no_grad():
                 v = torch.randn(A0.size(0), device=A0.device)  # (d,)
                 for _ in range(n_iterations):
@@ -281,13 +285,13 @@ class OperatorModel(nn.Module):
                     v = v / (v.norm() + _NUM_CFG.eps_division)
 
             # 计算谱范数：||A||_2 = sqrt(v^T A^T A v)
-            v_detached = v.detach()
-            ATA_v = A0.T @ (A0 @ v_detached)
-            spec = torch.sqrt((v_detached @ ATA_v).abs() + _NUM_CFG.eps_log)  # 标量
+            # v已经在no_grad上下文中，无需额外detach
+            ATA_v = A0.T @ (A0 @ v)
+            spec = torch.sqrt((v @ ATA_v).abs() + _NUM_CFG.eps_log)  # 标量
 
             # 使用ReLU避免if分支（保持可微性和TorchScript兼容）
             excess = spec - max_allowed
-            penalty = penalty + torch.nn.functional.relu(excess) ** 2
+            penalty = penalty + F.relu(excess) ** 2
 
         # 对每个响应基 B_k 计算谱范数
         for k in range(self.K):
@@ -301,13 +305,13 @@ class OperatorModel(nn.Module):
                     v = v / (v.norm() + _NUM_CFG.eps_division)
 
             # 计算谱范数：||B_k||_2 = sqrt(v^T B_k^T B_k v)
-            v_detached = v.detach()
-            BTB_v = Bk.T @ (Bk @ v_detached)
-            spec = torch.sqrt((v_detached @ BTB_v).abs() + _NUM_CFG.eps_log)
+            # v已经在no_grad上下文中，无需额外detach
+            BTB_v = Bk.T @ (Bk @ v)
+            spec = torch.sqrt((v @ BTB_v).abs() + _NUM_CFG.eps_log)
 
             # 使用ReLU避免if分支
             excess = spec - max_allowed
-            penalty = penalty + torch.nn.functional.relu(excess) ** 2
+            penalty = penalty + F.relu(excess) ** 2
 
         return penalty
 
@@ -363,6 +367,28 @@ class OperatorModel(nn.Module):
 
         return alpha, beta
 
+    def condition_to_coefficients(
+        self,
+        cond_vec: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        别名: get_response_profile
+
+        为向后兼容保留的方法名称。
+
+        参数:
+            cond_vec: (B, cond_dim) 或 (cond_dim,) 条件向量
+
+        返回:
+            alpha: (B, K) 或 (K,) 线性响应系数
+            beta: (B, K) 或 (K,) 平移响应系数
+
+        注意:
+            推荐使用 get_response_profile 方法。
+            此方法保留用于向后兼容，未来版本可能移除。
+        """
+        return self.get_response_profile(cond_vec)
+
     @torch.no_grad()
     def compute_operator_norm(
         self,
@@ -374,6 +400,8 @@ class OperatorModel(nn.Module):
         """
         计算算子A_θ的范数（用于监控稳定性，不需要梯度）
 
+        优化版本：直接构造A_θ，避免不必要的前向传播
+
         参数:
             tissue_idx: (B,) 组织索引
             cond_vec: (B, cond_dim) 条件向量
@@ -383,6 +411,11 @@ class OperatorModel(nn.Module):
         返回:
             norms: (B,) 每个算子的范数
 
+        实现优化：
+            - 直接计算A_θ = A_t^(0) + Σ_k α_k(θ) B_k，无需完整前向传播
+            - 避免创建虚拟输入z_dummy
+            - 减少内存分配和计算开销
+
         示例:
             >>> model = OperatorModel(32, 3, 5, 64)
             >>> tissue_idx = torch.zeros(10, dtype=torch.long)
@@ -391,28 +424,48 @@ class OperatorModel(nn.Module):
             >>> print(norms.mean(), norms.max())
             tensor(1.0234) tensor(1.0567)
         """
-        # 构造虚拟输入（不实际使用z）
         B = tissue_idx.size(0)
-        z_dummy = torch.zeros(B, self.latent_dim, device=tissue_idx.device)
 
-        # 获取A_θ
-        _, A_theta, _ = self.forward(z_dummy, tissue_idx, cond_vec)  # (B, d, d)
+        # 直接构造A_θ，无需完整前向传播（优化版）
+        # 1. 计算响应基系数
+        alpha = self.alpha_mlp(cond_vec)  # (B, K)
+
+        # 2. 获取基线算子
+        A0 = self.A0_tissue[tissue_idx]  # (B, d, d)
+
+        # 3. 组合响应基：A_θ = A_t^(0) + Σ_k α_k(θ) B_k
+        A_res = torch.einsum('bk,kij->bij', alpha, self.B)  # (B, d, d)
+        A_theta = A0 + A_res  # (B, d, d)
 
         if norm_type == "frobenius":
             # Frobenius范数：||A||_F = sqrt(Σᵢⱼ A²ᵢⱼ)
             norms = torch.norm(A_theta.view(B, -1), dim=-1)  # (B,)
+
         elif norm_type == "spectral":
             # 谱范数：使用向量化的power iteration
-            # 对 A^T A 进行迭代（正确的谱范数计算）
+            # 对 A^T A 进行迭代
             v = torch.randn(B, self.latent_dim, device=A_theta.device)  # (B, d)
+
             for _ in range(n_iterations):
                 # v ← A^T A v，使用bmm进行批量矩阵乘法
-                v = torch.bmm(A_theta.transpose(1, 2), torch.bmm(A_theta, v.unsqueeze(-1))).squeeze(-1)
+                v = torch.bmm(
+                    A_theta.transpose(1, 2),
+                    torch.bmm(A_theta, v.unsqueeze(-1))
+                ).squeeze(-1)  # (B, d)
+
+                # 归一化
                 v = v / (v.norm(dim=-1, keepdim=True) + _NUM_CFG.eps_division)
 
             # 计算谱范数：||A||_2 = sqrt(v^T A^T A v)
-            ATA_v = torch.bmm(A_theta.transpose(1, 2), torch.bmm(A_theta, v.unsqueeze(-1))).squeeze(-1)
-            norms = torch.sqrt((v * ATA_v).sum(dim=-1).abs() + _NUM_CFG.eps_log)  # (B,)
+            ATA_v = torch.bmm(
+                A_theta.transpose(1, 2),
+                torch.bmm(A_theta, v.unsqueeze(-1))
+            ).squeeze(-1)  # (B, d)
+
+            norms = torch.sqrt(
+                (v * ATA_v).sum(dim=-1).abs() + _NUM_CFG.eps_log
+            )  # (B,)
+
         else:
             raise ValueError(f"Unknown norm_type: {norm_type}")
 
