@@ -77,10 +77,25 @@ def train_operator(
                 z0, z1 = mu0, mu1
             
             z1_pred, A_theta, b_theta = operator_model(z0, tissue_idx, cond_vec)
-            
+
+            # 数值稳定性检查
+            if torch.isnan(z1_pred).any() or torch.isinf(z1_pred).any():
+                logger.error(f"Epoch {epoch+1}: 检测到NaN/Inf在z1_pred中")
+                logger.error(f"A_theta范数: max={A_theta.norm(dim=(1,2)).max():.4f}, min={A_theta.norm(dim=(1,2)).min():.4f}")
+                logger.error(f"z0范数: max={z0.norm(dim=1).max():.4f}, min={z0.norm(dim=1).min():.4f}")
+                logger.error(f"b_theta范数: max={b_theta.norm(dim=1).max():.4f}, min={b_theta.norm(dim=1).min():.4f}")
+                raise RuntimeError("数值不稳定：检测到NaN或Inf，训练终止")
+
             ed2 = energy_distance(z1_pred, z1)
             stab_penalty = operator_model.spectral_penalty(max_allowed=operator_model.max_spectral_norm)
             loss = config.lambda_e * ed2 + config.lambda_stab * stab_penalty
+
+            # 损失值稳定性检查
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"Epoch {epoch+1}: 检测到NaN/Inf在损失函数中")
+                logger.error(f"E-distance: {ed2.item():.4f}")
+                logger.error(f"谱惩罚: {stab_penalty.item():.4f}")
+                raise RuntimeError("数值不稳定：损失函数为NaN或Inf，训练终止")
             
             optimizer.zero_grad()
             loss.backward()

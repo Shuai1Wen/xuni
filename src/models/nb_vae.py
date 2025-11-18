@@ -409,8 +409,8 @@ def elbo_loss(
     x: torch.Tensor,
     tissue_onehot: torch.Tensor,
     model: NBVAE,
-    beta_kl: float = 1.0
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    beta: float = 1.0
+) -> Tuple[torch.Tensor, dict]:
     """
     ELBO损失函数
 
@@ -424,11 +424,14 @@ def elbo_loss(
         x: (B, G) 基因表达计数
         tissue_onehot: (B, n_tissues) 组织one-hot编码
         model: NBVAE模型
-        beta_kl: KL散度权重（β-VAE），默认1.0
+        beta: KL散度权重（β-VAE），默认1.0
 
     返回:
         loss: 标量，负ELBO（需要最小化）
-        z: (B, latent_dim) 采样的潜变量（detached，用于下游任务）
+        loss_dict: 损失分量字典，包含以下键：
+            - "recon_loss": 重建损失（负对数似然）
+            - "kl_loss": KL散度
+            - "z": 采样的潜变量（detached，用于下游任务）
 
     ELBO分解：
         - 重建项：log p(x|z) = Σ_g log NB(x_g; μ_g, r_g)
@@ -437,22 +440,23 @@ def elbo_loss(
 
     实现细节：
         - 返回 -ELBO，因为优化器执行最小化
-        - z detach后返回，避免影响后续计算的梯度
+        - loss_dict中的各分量都已detach，用于记录和监控
 
     示例:
         >>> model = NBVAE(n_genes=2000, latent_dim=32, n_tissues=3)
         >>> x = torch.randn(64, 2000)
         >>> tissue_onehot = torch.zeros(64, 3)
         >>> tissue_onehot[:, 0] = 1
-        >>> loss, z = elbo_loss(x, tissue_onehot, model)
-        >>> print(loss.shape, z.shape)
-        torch.Size([]) torch.Size([64, 32])
+        >>> loss, loss_dict = elbo_loss(x, tissue_onehot, model)
+        >>> print(loss.shape, loss_dict.keys())
+        torch.Size([]) dict_keys(['recon_loss', 'kl_loss', 'z'])
     """
     # 前向传播
     z, mu_x, r_x, mu_z, logvar_z = model(x, tissue_onehot)
 
     # 重建项：log p(x|z)
     log_px = nb_log_likelihood(x, mu_x, r_x)  # (B,)
+    recon_loss = -log_px.mean()  # 负对数似然
 
     # KL散度：KL(q(z|x)||N(0,I))
     # 解析解：-0.5 * Σ (1 + log σ² - μ² - σ²)
@@ -460,10 +464,16 @@ def elbo_loss(
         1 + logvar_z - mu_z.pow(2) - logvar_z.exp(),
         dim=-1
     )  # (B,)
+    kl_loss = kl.mean()
 
-    # ELBO = E[log p(x|z)] - β·KL
-    # 损失 = -ELBO（最小化）
-    loss = -(log_px - beta_kl * kl).mean()  # 标量
+    # 总损失：重建损失 + β·KL散度
+    loss = recon_loss + beta * kl_loss
 
-    # 返回loss和detached的z（用于下游任务，不影响梯度）
-    return loss, z.detach()
+    # 返回损失和分量字典
+    loss_dict = {
+        "recon_loss": recon_loss.detach(),
+        "kl_loss": kl_loss.detach(),
+        "z": z.detach()  # 用于下游任务
+    }
+
+    return loss, loss_dict
