@@ -1,14 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-­Ã!W
+è®­ç»ƒæ¨¡å—
 
-,!WĞ›VAEŒ—P!‹„­Ãª¯
-
-;Ÿı
-- train_embed_core.py: \zôLe­ÃVAE­Ã	
-- train_operator_core.py: —P!‹­Ãß	
-
-ù”suanfa.md,351-451L
+æœ¬æ¨¡å—æä¾›VAEå’Œç®—å­æ¨¡å‹çš„è®­ç»ƒå¾ªç¯ã€‚
 """
 
 from .train_embed_core import train_embedding

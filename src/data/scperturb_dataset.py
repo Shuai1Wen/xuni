@@ -141,13 +141,15 @@ class SCPerturbPairDataset(Dataset):
         adata,
         cond_encoder: ConditionEncoder,
         tissue2idx: Dict[str, int],
-        max_pairs_per_condition: int = 500
+        max_pairs_per_condition: int = 500,
+        seed: Optional[int] = None
     ):
         self.adata = adata
         self.cond_encoder = cond_encoder
         self.tissue2idx = tissue2idx
         self.n_tissues = len(tissue2idx)
         self.max_pairs_per_condition = max_pairs_per_condition
+        self.seed = seed  # 保存seed用于可重复性
 
         # 构建配对
         self.pairs = self._build_pairs()
@@ -199,7 +201,7 @@ class SCPerturbPairDataset(Dataset):
             )
 
             # 随机采样
-            rng = np.random.RandomState(42)  # 固定种子确保可重复
+            rng = np.random.RandomState(self.seed)  # 使用可控的随机种子
             t0_sampled = rng.choice(t0_indices, size=n_pairs, replace=True)
             t1_sampled = rng.choice(t1_indices, size=n_pairs, replace=True)
 

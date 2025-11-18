@@ -184,15 +184,11 @@ class OperatorModel(nn.Module):
         # 3. 组合响应基构造 A_θ
         # A_θ = A_t^(0) + Σ_{k=1}^K α_k(θ) B_k
 
-        # 将B_k扩展到batch维度：(K, d, d) → (B, K, d, d)
-        B_expand = self.B.unsqueeze(0).expand(B, -1, -1, -1)  # (B, K, d, d)
-
-        # 将α_k(θ)扩展用于加权：(B, K) → (B, K, 1, 1)
-        alpha_expand = alpha.view(B, self.K, 1, 1)  # (B, K, 1, 1)
-
-        # 加权求和：Σ_k α_k(θ) B_k
-        # (B, K, 1, 1) * (B, K, d, d) → (B, K, d, d) → sum over K → (B, d, d)
-        A_res = (alpha_expand * B_expand).sum(dim=1)  # (B, d, d)
+        # 使用einsum计算加权求和，避免expand带来的内存开销
+        # einsum('bk,kij->bij', alpha, self.B) 等价于：
+        #   对每个b: Σ_k α[b,k] * B[k,i,j]
+        # 这样避免创建 (B, K, d, d) 的中间张量，节省 5倍内存
+        A_res = torch.einsum('bk,kij->bij', alpha, self.B)  # (B, d, d)
 
         # 最终算子：A_θ = A_t^(0) + Σ α_k B_k
         A_theta = A0 + A_res  # (B, d, d)
@@ -200,15 +196,10 @@ class OperatorModel(nn.Module):
         # 4. 组合平移基构造 b_θ
         # b_θ = b_t^(0) + Σ_{k=1}^K β_k(θ) u_k
 
-        # 将u_k扩展到batch维度：(K, d) → (B, K, d)
-        u_expand = self.u.unsqueeze(0).expand(B, -1, -1)  # (B, K, d)
-
-        # 将β_k(θ)扩展用于加权：(B, K) → (B, K, 1)
-        beta_expand = beta.view(B, self.K, 1)  # (B, K, 1)
-
-        # 加权求和：Σ_k β_k(θ) u_k
-        # (B, K, 1) * (B, K, d) → (B, K, d) → sum over K → (B, d)
-        b_res = (beta_expand * u_expand).sum(dim=1)  # (B, d)
+        # 使用einsum计算加权求和，避免expand带来的内存开销
+        # einsum('bk,ki->bi', beta, self.u) 等价于：
+        #   对每个b: Σ_k β[b,k] * u[k,i]
+        b_res = torch.einsum('bk,ki->bi', beta, self.u)  # (B, d)
 
         # 最终平移：b_θ = b_t^(0) + Σ β_k u_k
         b_theta = b0 + b_res  # (B, d)
@@ -274,17 +265,19 @@ class OperatorModel(nn.Module):
         for t in range(self.n_tissues):
             A0 = self.A0_tissue[t]  # (d, d)
 
-            # Power iteration 估计最大特征值
-            v = torch.randn(A0.size(0), device=A0.device)  # (d,)
+            # Power iteration 估计最大特征值（v的迭代不需要梯度）
+            with torch.no_grad():
+                v = torch.randn(A0.size(0), device=A0.device)  # (d,)
+                for _ in range(n_iterations):
+                    # v ← Av
+                    v = A0 @ v
+                    # 归一化：v ← v / ||v||
+                    v = v / (v.norm() + 1e-8)
 
-            for _ in range(n_iterations):
-                # v ← Av
-                v = A0 @ v
-                # 归一化：v ← v / ||v||
-                v = v / (v.norm() + 1e-8)
-
-            # 计算 Rayleigh 商：λ_max ≈ v^T Av / v^T v = v^T (Av)
-            spec = (v @ (A0 @ v)).abs()  # 标量
+            # 计算 Rayleigh 商（使用detach的v，但保留A0的梯度）
+            # v.detach()确保v是常数，但v^T A0 v仍对A0有梯度
+            v_detached = v.detach()
+            spec = (v_detached @ (A0 @ v_detached)).abs()  # 标量
 
             # 如果谱范数超过阈值，添加惩罚
             if spec > max_allowed:
@@ -294,14 +287,16 @@ class OperatorModel(nn.Module):
         for k in range(self.K):
             Bk = self.B[k]  # (d, d)
 
-            # Power iteration
-            v = torch.randn(Bk.size(0), device=Bk.device)  # (d,)
+            # Power iteration（v的迭代不需要梯度）
+            with torch.no_grad():
+                v = torch.randn(Bk.size(0), device=Bk.device)  # (d,)
+                for _ in range(n_iterations):
+                    v = Bk @ v
+                    v = v / (v.norm() + 1e-8)
 
-            for _ in range(n_iterations):
-                v = Bk @ v
-                v = v / (v.norm() + 1e-8)
-
-            spec = (v @ (Bk @ v)).abs()
+            # 计算谱范数（保留对Bk的梯度）
+            v_detached = v.detach()
+            spec = (v_detached @ (Bk @ v_detached)).abs()
 
             if spec > max_allowed:
                 penalty = penalty + (spec - max_allowed) ** 2
@@ -360,6 +355,7 @@ class OperatorModel(nn.Module):
 
         return alpha, beta
 
+    @torch.no_grad()
     def compute_operator_norm(
         self,
         tissue_idx: torch.Tensor,
@@ -367,7 +363,7 @@ class OperatorModel(nn.Module):
         norm_type: str = "spectral"
     ) -> torch.Tensor:
         """
-        计算算子A_θ的范数（用于监控稳定性）
+        计算算子A_θ的范数（用于监控稳定性，不需要梯度）
 
         参数:
             tissue_idx: (B,) 组织索引
