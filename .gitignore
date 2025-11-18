@@ -66,3 +66,6 @@ htmlcov/
 
 # Documentation
 docs/build/
+
+# 备份的损坏文件
+*.backup_corrupted
