@@ -270,41 +270,44 @@ class OperatorModel(nn.Module):
         for t in range(self.n_tissues):
             A0 = self.A0_tissue[t]  # (d, d)
 
-            # Power iteration 估计最大特征值（v的迭代不需要梯度）
+            # Power iteration 估计谱范数（最大奇异值）
+            # 对 A^T A 进行power iteration
             with torch.no_grad():
                 v = torch.randn(A0.size(0), device=A0.device)  # (d,)
                 for _ in range(n_iterations):
-                    # v ← Av
-                    v = A0 @ v
+                    # v ← A^T A v
+                    v = A0.T @ (A0 @ v)
                     # 归一化：v ← v / ||v||
                     v = v / (v.norm() + _NUM_CFG.eps_division)
 
-            # 计算 Rayleigh 商（使用detach的v，但保留A0的梯度）
-            # v.detach()确保v是常数，但v^T A0 v仍对A0有梯度
+            # 计算谱范数：||A||_2 = sqrt(v^T A^T A v)
             v_detached = v.detach()
-            spec = (v_detached @ (A0 @ v_detached)).abs()  # 标量
+            ATA_v = A0.T @ (A0 @ v_detached)
+            spec = torch.sqrt((v_detached @ ATA_v).abs() + _NUM_CFG.eps_log)  # 标量
 
-            # 如果谱范数超过阈值，添加惩罚
-            if spec > max_allowed:
-                penalty = penalty + (spec - max_allowed) ** 2
+            # 使用ReLU避免if分支（保持可微性和TorchScript兼容）
+            excess = spec - max_allowed
+            penalty = penalty + torch.nn.functional.relu(excess) ** 2
 
         # 对每个响应基 B_k 计算谱范数
         for k in range(self.K):
             Bk = self.B[k]  # (d, d)
 
-            # Power iteration（v的迭代不需要梯度）
+            # Power iteration 估计谱范数（对 B_k^T B_k 迭代）
             with torch.no_grad():
                 v = torch.randn(Bk.size(0), device=Bk.device)  # (d,)
                 for _ in range(n_iterations):
-                    v = Bk @ v
+                    v = Bk.T @ (Bk @ v)
                     v = v / (v.norm() + _NUM_CFG.eps_division)
 
-            # 计算谱范数（保留对Bk的梯度）
+            # 计算谱范数：||B_k||_2 = sqrt(v^T B_k^T B_k v)
             v_detached = v.detach()
-            spec = (v_detached @ (Bk @ v_detached)).abs()
+            BTB_v = Bk.T @ (Bk @ v_detached)
+            spec = torch.sqrt((v_detached @ BTB_v).abs() + _NUM_CFG.eps_log)
 
-            if spec > max_allowed:
-                penalty = penalty + (spec - max_allowed) ** 2
+            # 使用ReLU避免if分支
+            excess = spec - max_allowed
+            penalty = penalty + torch.nn.functional.relu(excess) ** 2
 
         return penalty
 
@@ -397,14 +400,17 @@ class OperatorModel(nn.Module):
             # Frobenius范数：||A||_F = sqrt(Σᵢⱼ A²ᵢⱼ)
             norms = torch.norm(A_theta.view(B, -1), dim=-1)  # (B,)
         elif norm_type == "spectral":
-            # 谱范数：使用power iteration近似
-            norms = torch.zeros(B, device=A_theta.device)
-            for i in range(B):
-                v = torch.randn(self.latent_dim, device=A_theta.device)
-                for _ in range(5):
-                    v = A_theta[i] @ v
-                    v = v / (v.norm() + _NUM_CFG.eps_division)
-                norms[i] = (v @ (A_theta[i] @ v)).abs()
+            # 谱范数：使用向量化的power iteration
+            # 对 A^T A 进行迭代（正确的谱范数计算）
+            v = torch.randn(B, self.latent_dim, device=A_theta.device)  # (B, d)
+            for _ in range(n_iterations):
+                # v ← A^T A v，使用bmm进行批量矩阵乘法
+                v = torch.bmm(A_theta.transpose(1, 2), torch.bmm(A_theta, v.unsqueeze(-1))).squeeze(-1)
+                v = v / (v.norm(dim=-1, keepdim=True) + _NUM_CFG.eps_division)
+
+            # 计算谱范数：||A||_2 = sqrt(v^T A^T A v)
+            ATA_v = torch.bmm(A_theta.transpose(1, 2), torch.bmm(A_theta, v.unsqueeze(-1))).squeeze(-1)
+            norms = torch.sqrt((v * ATA_v).sum(dim=-1).abs() + _NUM_CFG.eps_log)  # (B,)
         else:
             raise ValueError(f"Unknown norm_type: {norm_type}")
 

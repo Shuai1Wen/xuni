@@ -306,10 +306,15 @@ def nb_log_likelihood(
     )  # (B, G)
 
     # r·log(r/(r+μ)) + x·log(μ/(r+μ))
-    # 为了数值稳定，改写为：
-    # r·[log(r) - log(r+μ)] + x·[log(μ) - log(r+μ)]
-    log_r_over_r_plus_mu = torch.log(r / (r + mu) + eps)     # (B, G)
-    log_mu_over_r_plus_mu = torch.log(mu / (r + mu) + eps)   # (B, G)
+    # 为了数值稳定，使用对数减法性质：
+    # log(a/b) = log(a) - log(b)
+    # 避免直接计算除法和小数
+    log_r = torch.log(r + eps)
+    log_mu = torch.log(mu + eps)
+    log_r_plus_mu = torch.log(r + mu + eps)
+
+    log_r_over_r_plus_mu = log_r - log_r_plus_mu     # (B, G)
+    log_mu_over_r_plus_mu = log_mu - log_r_plus_mu   # (B, G)
 
     log_p = (
         log_coef
