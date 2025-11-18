@@ -22,6 +22,11 @@
 import torch
 from typing import Optional
 
+from ..config import NumericalConfig
+
+# 默认数值配置
+_NUM_CFG = NumericalConfig()
+
 
 def pairwise_distances(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
@@ -80,7 +85,7 @@ def pairwise_distances(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     dist2 = torch.clamp(dist2, min=0.0)
 
     # 开方得到距离，添加epsilon避免梯度不稳定
-    distances = torch.sqrt(dist2 + 1e-8)  # (n, m)
+    distances = torch.sqrt(dist2 + _NUM_CFG.eps_distance)  # (n, m)
 
     return distances
 
@@ -233,39 +238,39 @@ def energy_distance_batched(
     if n == 0 or m == 0:
         return torch.tensor(0.0, device=x.device)
 
-    # 分块计算term_xy
-    term_xy = 0.0
+    # 分块计算term_xy（保持张量以维持梯度）
+    term_xy = torch.tensor(0.0, device=x.device)
     for i in range(0, n, batch_size):
         x_batch = x[i:i + batch_size]
         for j in range(0, m, batch_size):
             y_batch = y[j:j + batch_size]
             d_xy_batch = pairwise_distances(x_batch, y_batch)
-            term_xy += d_xy_batch.sum().item()
+            term_xy = term_xy + d_xy_batch.sum()
     term_xy = 2.0 / (n * m) * term_xy
 
     # 分块计算term_xx
-    term_xx = 0.0
+    term_xx = torch.tensor(0.0, device=x.device)
     for i in range(0, n, batch_size):
         x_batch_i = x[i:i + batch_size]
         for j in range(0, n, batch_size):
             x_batch_j = x[j:j + batch_size]
             d_xx_batch = pairwise_distances(x_batch_i, x_batch_j)
-            term_xx += d_xx_batch.sum().item()
+            term_xx = term_xx + d_xx_batch.sum()
     term_xx = 1.0 / (n * n) * term_xx
 
     # 分块计算term_yy
-    term_yy = 0.0
+    term_yy = torch.tensor(0.0, device=x.device)
     for i in range(0, m, batch_size):
         y_batch_i = y[i:i + batch_size]
         for j in range(0, m, batch_size):
             y_batch_j = y[j:j + batch_size]
             d_yy_batch = pairwise_distances(y_batch_i, y_batch_j)
-            term_yy += d_yy_batch.sum().item()
+            term_yy = term_yy + d_yy_batch.sum()
     term_yy = 1.0 / (m * m) * term_yy
 
     ed2 = term_xy - term_xx - term_yy
 
-    return torch.tensor(ed2, device=x.device)
+    return ed2
 
 
 def check_edistance_properties(
@@ -304,7 +309,7 @@ def check_edistance_properties(
 
     # 1. 非负性
     ed2_xy = energy_distance(x, y)
-    results["non_negative"] = ed2_xy.item() >= -1e-6
+    results["non_negative"] = ed2_xy.item() >= -_NUM_CFG.tol_test
     if verbose:
         if results["non_negative"]:
             print(f"✓ 非负性: E²(X,Y) = {ed2_xy.item():.4f} ≥ 0")
@@ -314,28 +319,28 @@ def check_edistance_properties(
     # 2. 对称性
     ed2_yx = energy_distance(y, x)
     sym_error = torch.abs(ed2_xy - ed2_yx).item()
-    results["symmetric"] = sym_error < 1e-6
+    results["symmetric"] = sym_error < _NUM_CFG.tol_test
     if verbose:
         if results["symmetric"]:
-            print(f"✓ 对称性: |E²(X,Y) - E²(Y,X)| = {sym_error:.2e} < 1e-6")
+            print(f"✓ 对称性: |E²(X,Y) - E²(Y,X)| = {sym_error:.2e} < {_NUM_CFG.tol_test}")
         else:
-            print(f"✗ 对称性: |E²(X,Y) - E²(Y,X)| = {sym_error:.2e} ≥ 1e-6")
+            print(f"✗ 对称性: |E²(X,Y) - E²(Y,X)| = {sym_error:.2e} ≥ {_NUM_CFG.tol_test}")
 
     # 3. 同一性
     ed2_xx = energy_distance(x, x)
-    results["identity"] = ed2_xx.item() < 1e-6
+    results["identity"] = ed2_xx.item() < _NUM_CFG.tol_test
     if verbose:
         if results["identity"]:
             print(f"✓ 同一性: E²(X,X) = {ed2_xx.item():.2e} ≈ 0")
         else:
-            print(f"✗ 同一性: E²(X,X) = {ed2_xx.item():.2e} > 1e-6")
+            print(f"✗ 同一性: E²(X,X) = {ed2_xx.item():.2e} > {_NUM_CFG.tol_test}")
 
     # 4. 三角不等式（可选）
     if z is not None:
         ed_xz = torch.sqrt(torch.clamp(energy_distance(x, z), min=0))
         ed_xy = torch.sqrt(torch.clamp(ed2_xy, min=0))
         ed_yz = torch.sqrt(torch.clamp(energy_distance(y, z), min=0))
-        triangle_holds = (ed_xz <= ed_xy + ed_yz + 1e-6).item()
+        triangle_holds = (ed_xz <= ed_xy + ed_yz + _NUM_CFG.tol_test).item()
         results["triangle"] = triangle_holds
         if verbose:
             if triangle_holds:

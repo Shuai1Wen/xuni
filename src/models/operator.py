@@ -23,6 +23,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Optional
 
+from ..config import NumericalConfig
+
+# 默认数值配置
+_NUM_CFG = NumericalConfig()
+
 
 class OperatorModel(nn.Module):
     """
@@ -272,7 +277,7 @@ class OperatorModel(nn.Module):
                     # v ← Av
                     v = A0 @ v
                     # 归一化：v ← v / ||v||
-                    v = v / (v.norm() + 1e-8)
+                    v = v / (v.norm() + _NUM_CFG.eps_division)
 
             # 计算 Rayleigh 商（使用detach的v，但保留A0的梯度）
             # v.detach()确保v是常数，但v^T A0 v仍对A0有梯度
@@ -292,7 +297,7 @@ class OperatorModel(nn.Module):
                 v = torch.randn(Bk.size(0), device=Bk.device)  # (d,)
                 for _ in range(n_iterations):
                     v = Bk @ v
-                    v = v / (v.norm() + 1e-8)
+                    v = v / (v.norm() + _NUM_CFG.eps_division)
 
             # 计算谱范数（保留对Bk的梯度）
             v_detached = v.detach()
@@ -398,7 +403,7 @@ class OperatorModel(nn.Module):
                 v = torch.randn(self.latent_dim, device=A_theta.device)
                 for _ in range(5):
                     v = A_theta[i] @ v
-                    v = v / (v.norm() + 1e-8)
+                    v = v / (v.norm() + _NUM_CFG.eps_division)
                 norms[i] = (v @ (A_theta[i] @ v)).abs()
         else:
             raise ValueError(f"Unknown norm_type: {norm_type}")

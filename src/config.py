@@ -14,6 +14,49 @@ from typing import List, Dict, Optional
 
 
 @dataclass
+class NumericalConfig:
+    """
+    数值稳定性配置
+
+    集中管理项目中所有数值计算的epsilon和容差参数。
+
+    参数:
+        eps_distance: 距离计算的epsilon (默认1e-8)
+            - 用于：pairwise_distances中的sqrt
+            - 防止：梯度在0处不稳定
+
+        eps_division: 除法运算的epsilon (默认1e-8)
+            - 用于：归一化、Pearson系数等
+            - 防止：除以零错误
+
+        eps_log: 对数计算的epsilon (默认1e-8)
+            - 用于：NB likelihood、KL散度等
+            - 防止：log(0)错误
+
+        eps_model_output: 模型输出的下界 (默认1e-8)
+            - 用于：VAE解码器的mu输出
+            - 防止：极端情况下的数值问题
+
+        tol_test: 测试验证的容差 (默认1e-6)
+            - 用于：数学性质验证（对称性、同一性等）
+            - 判断：两个浮点数是否"相等"
+
+    示例:
+        >>> num_cfg = NumericalConfig()
+        >>> print(num_cfg.eps_distance)
+        1e-08
+
+        >>> # 自定义配置
+        >>> num_cfg = NumericalConfig(eps_distance=1e-10, tol_test=1e-5)
+    """
+    eps_distance: float = 1e-8
+    eps_division: float = 1e-8
+    eps_log: float = 1e-8
+    eps_model_output: float = 1e-8
+    tol_test: float = 1e-6
+
+
+@dataclass
 class ModelConfig:
     """
     模型配置参数
@@ -217,3 +260,13 @@ def set_seed(seed: int) -> None:
         # 设置为确定性模式（可能影响性能）
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+
+# 导出的公共接口
+__all__ = [
+    "NumericalConfig",
+    "ModelConfig",
+    "TrainingConfig",
+    "ConditionMeta",
+    "set_seed",
+]

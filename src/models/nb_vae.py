@@ -20,6 +20,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
 
+from ..config import NumericalConfig
+
+# 默认数值配置
+_NUM_CFG = NumericalConfig()
+
 
 class Encoder(nn.Module):
     """
@@ -200,7 +205,7 @@ class DecoderNB(nn.Module):
 
         # 输出负二项分布的均值参数μ
         # softplus(x) = log(1 + exp(x)) 保证输出>0
-        mu = F.softplus(self.fc_mu(h)) + 1e-8  # (B, G)
+        mu = F.softplus(self.fc_mu(h)) + _NUM_CFG.eps_model_output  # (B, G)
 
         # 离散度参数r（基因特异）
         # shape: (1, G) 会自动广播到 (B, G)
@@ -248,7 +253,7 @@ def nb_log_likelihood(
     x: torch.Tensor,
     mu: torch.Tensor,
     r: torch.Tensor,
-    eps: float = 1e-8
+    eps: float = None
 ) -> torch.Tensor:
     """
     负二项分布的对数似然
@@ -287,6 +292,10 @@ def nb_log_likelihood(
         >>> print(log_p.shape)
         torch.Size([1])
     """
+    # 使用配置的epsilon值
+    if eps is None:
+        eps = _NUM_CFG.eps_log
+
     x = x.float()  # 确保为float类型
 
     # log Γ(x+r) - log Γ(r) - log Γ(x+1)

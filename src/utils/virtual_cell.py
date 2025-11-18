@@ -23,6 +23,10 @@
 import torch
 from typing import List, Optional, Tuple
 from ..models.nb_vae import NBVAE
+from ..config import NumericalConfig
+
+# 默认数值配置
+_NUM_CFG = NumericalConfig()
 from ..models.operator import OperatorModel
 
 
@@ -332,22 +336,17 @@ def compute_reconstruction_error(
     # MSE
     mse = ((x - x_recon) ** 2).mean(dim=-1)  # (B,)
 
-    # Pearson相关系数
-    B, G = x.shape
-    correlation = torch.zeros(B, device=device)
+    # Pearson相关系数（向量化实现）
+    # 中心化：(B, G) - (B, 1) → (B, G)
+    x_centered = x - x.mean(dim=-1, keepdim=True)
+    xr_centered = x_recon - x_recon.mean(dim=-1, keepdim=True)
 
-    for i in range(B):
-        x_i = x[i]
-        x_recon_i = x_recon[i]
-
-        # 中心化
-        x_centered = x_i - x_i.mean()
-        xr_centered = x_recon_i - x_recon_i.mean()
-
-        # 相关系数
-        numerator = (x_centered * xr_centered).sum()
-        denominator = torch.sqrt((x_centered ** 2).sum() * (xr_centered ** 2).sum())
-        correlation[i] = numerator / (denominator + 1e-8)
+    # 计算相关系数：对每个样本计算
+    numerator = (x_centered * xr_centered).sum(dim=-1)  # (B,)
+    denominator = torch.sqrt(
+        (x_centered ** 2).sum(dim=-1) * (xr_centered ** 2).sum(dim=-1)
+    )  # (B,)
+    correlation = numerator / (denominator + _NUM_CFG.eps_division)  # (B,)
 
     return mse, correlation
 
