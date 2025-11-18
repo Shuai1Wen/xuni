@@ -55,7 +55,7 @@ try:
         n_genes=n_genes,
         latent_dim=latent_dim,
         n_tissues=n_tissues,
-        hidden_dims=[64, 32]
+        hidden_dim=64
     ).to(device)
 
     # 创建虚拟数据
@@ -67,9 +67,9 @@ try:
     print(f"  输入数据: x.shape={x.shape}, tissue.shape={tissue_onehot.shape}")
 
     # 前向传播
-    mu_x, r_x, mu_z, logvar_z = vae(x, tissue_onehot)
+    z, mu_x, r_x, mu_z, logvar_z = vae(x, tissue_onehot)
     print(f"  重建: mu_x.shape={mu_x.shape}, r_x.shape={r_x.shape}")
-    print(f"  潜变量: mu_z.shape={mu_z.shape}, logvar_z.shape={logvar_z.shape}")
+    print(f"  潜变量: z.shape={z.shape}, mu_z.shape={mu_z.shape}, logvar_z.shape={logvar_z.shape}")
 
     # 检查输出
     assert mu_x.shape == x.shape, "重建形状应与输入相同"
@@ -86,11 +86,11 @@ try:
     print("  ✓ 修复后的NB对数似然稳定")
 
     # 测试ELBO损失
-    loss, loss_dict = elbo_loss(x, tissue_onehot, vae, beta=1.0)
+    loss, z_sampled = elbo_loss(x, tissue_onehot, vae, beta_kl=1.0)
     print(f"  ELBO loss: {loss.item():.4f}")
-    print(f"    - recon_loss: {loss_dict['recon_loss'].item():.4f}")
-    print(f"    - kl_loss: {loss_dict['kl_loss'].item():.4f}")
+    print(f"  采样的潜变量: z_sampled.shape={z_sampled.shape}")
     assert not torch.isnan(loss), "ELBO loss不应为NaN"
+    assert torch.isfinite(loss), "ELBO loss应为有限值"
     print("  ✓ ELBO损失计算正确")
 
     # 测试梯度
@@ -121,7 +121,7 @@ try:
         n_tissues=n_tissues,
         n_response_bases=n_response_bases,
         cond_dim=cond_dim,
-        max_spectral_norm=1.05
+        hidden_dim=64
     ).to(device)
 
     # 创建输入
@@ -151,10 +151,10 @@ try:
 
     # 测试修复后的compute_operator_norm（向量化版本）
     norms_spectral = operator.compute_operator_norm(
-        A_theta, norm_type="spectral", n_iterations=20
+        tissue_idx, cond_vec, norm_type="spectral", n_iterations=20
     )
     norms_frobenius = operator.compute_operator_norm(
-        A_theta, norm_type="frobenius"
+        tissue_idx, cond_vec, norm_type="frobenius"
     )
     print(f"  谱范数: mean={norms_spectral.mean().item():.4f}, max={norms_spectral.max().item():.4f}")
     print(f"  Frobenius范数: mean={norms_frobenius.mean().item():.4f}")

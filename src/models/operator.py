@@ -368,7 +368,8 @@ class OperatorModel(nn.Module):
         self,
         tissue_idx: torch.Tensor,
         cond_vec: torch.Tensor,
-        norm_type: str = "spectral"
+        norm_type: str = "spectral",
+        n_iterations: int = 10
     ) -> torch.Tensor:
         """
         计算算子A_θ的范数（用于监控稳定性，不需要梯度）
@@ -377,6 +378,7 @@ class OperatorModel(nn.Module):
             tissue_idx: (B,) 组织索引
             cond_vec: (B, cond_dim) 条件向量
             norm_type: 范数类型，可选 "spectral"（谱范数）或 "frobenius"（F范数）
+            n_iterations: power iteration的迭代次数（默认10，仅用于spectral）
 
         返回:
             norms: (B,) 每个算子的范数
