@@ -238,35 +238,35 @@ def energy_distance_batched(
     if n == 0 or m == 0:
         return torch.tensor(0.0, device=x.device)
 
-    # 分块计算term_xy（保持张量以维持梯度）
-    term_xy = torch.tensor(0.0, device=x.device)
+    # 分块计算term_xy（收集所有块以维持完整梯度图）
+    xy_chunks = []
     for i in range(0, n, batch_size):
         x_batch = x[i:i + batch_size]
         for j in range(0, m, batch_size):
             y_batch = y[j:j + batch_size]
             d_xy_batch = pairwise_distances(x_batch, y_batch)
-            term_xy = term_xy + d_xy_batch.sum()
-    term_xy = 2.0 / (n * m) * term_xy
+            xy_chunks.append(d_xy_batch.sum())
+    term_xy = 2.0 / (n * m) * torch.stack(xy_chunks).sum()
 
-    # 分块计算term_xx
-    term_xx = torch.tensor(0.0, device=x.device)
+    # 分块计算term_xx（收集所有块以维持完整梯度图）
+    xx_chunks = []
     for i in range(0, n, batch_size):
         x_batch_i = x[i:i + batch_size]
         for j in range(0, n, batch_size):
             x_batch_j = x[j:j + batch_size]
             d_xx_batch = pairwise_distances(x_batch_i, x_batch_j)
-            term_xx = term_xx + d_xx_batch.sum()
-    term_xx = 1.0 / (n * n) * term_xx
+            xx_chunks.append(d_xx_batch.sum())
+    term_xx = 1.0 / (n * n) * torch.stack(xx_chunks).sum()
 
-    # 分块计算term_yy
-    term_yy = torch.tensor(0.0, device=x.device)
+    # 分块计算term_yy（收集所有块以维持完整梯度图）
+    yy_chunks = []
     for i in range(0, m, batch_size):
         y_batch_i = y[i:i + batch_size]
         for j in range(0, m, batch_size):
             y_batch_j = y[j:j + batch_size]
             d_yy_batch = pairwise_distances(y_batch_i, y_batch_j)
-            term_yy = term_yy + d_yy_batch.sum()
-    term_yy = 1.0 / (m * m) * term_yy
+            yy_chunks.append(d_yy_batch.sum())
+    term_yy = 1.0 / (m * m) * torch.stack(yy_chunks).sum()
 
     ed2 = term_xy - term_xx - term_yy
 

@@ -209,7 +209,8 @@ class DecoderNB(nn.Module):
 
         # 离散度参数r（基因特异）
         # shape: (1, G) 会自动广播到 (B, G)
-        r = torch.exp(self.log_dispersion).unsqueeze(0)  # (1, G)
+        # 添加下界防止r过小导致数值不稳定
+        r = torch.exp(self.log_dispersion).unsqueeze(0) + _NUM_CFG.eps_model_output  # (1, G)
 
         return mu, r
 
@@ -240,6 +241,9 @@ def sample_z(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         tensor(1.0123)
     """
     # σ = exp(0.5 * log(σ²)) = exp(log(σ)) = σ
+    # 裁剪logvar防止指数溢出：logvar∈[-10,10] → std∈[0.0067, 148.4]
+    # 这确保数值稳定性，同时允许足够的方差范围
+    logvar = torch.clamp(logvar, min=-10.0, max=10.0)
     std = torch.exp(0.5 * logvar)  # (B, latent_dim)
 
     # ε ~ N(0,1)
@@ -297,6 +301,12 @@ def nb_log_likelihood(
         eps = _NUM_CFG.eps_log
 
     x = x.float()  # 确保为float类型
+
+    # 输入验证：确保参数在有效范围内，防止lgamma产生NaN
+    # r必须>0（负二项分布的定义域要求）
+    r = torch.clamp(r, min=eps)
+    # x必须>=0（计数数据的自然约束）
+    x = torch.clamp(x, min=0.0)
 
     # log Γ(x+r) - log Γ(r) - log Γ(x+1)
     log_coef = (
@@ -467,8 +477,10 @@ def elbo_loss(
 
     # KL散度：KL(q(z|x)||N(0,I))
     # 解析解：-0.5 * Σ (1 + log σ² - μ² - σ²)
+    # 裁剪logvar防止指数溢出（与sample_z中的限制一致）
+    logvar_z_clamped = torch.clamp(logvar_z, min=-10.0, max=10.0)
     kl = -0.5 * torch.sum(
-        1 + logvar_z - mu_z.pow(2) - logvar_z.exp(),
+        1 + logvar_z_clamped - mu_z.pow(2) - logvar_z_clamped.exp(),
         dim=-1
     )  # (B,)
     kl_loss = kl.mean()
