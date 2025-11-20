@@ -636,3 +636,398 @@ ls -lh README.md requirements.txt
 **文档修复者**: Claude Code
 **修复日期**: 2025-11-18
 **状态**: ✅ 文档修复完成
+
+---
+
+## 阶段5：NBVAE参数错误修复
+
+### 修复时间
+2025-11-20
+
+### 问题发现
+用户在运行 `examples/complete_example.py` 时遇到以下错误：
+```
+TypeError: NBVAE.__init__() got an unexpected keyword argument 'hidden_dims'
+```
+
+### 问题分析
+多个文件中使用了错误的参数名 `hidden_dims`（复数），但 NBVAE 的构造函数期待的是 `hidden_dim`（单数），并且是一个整数而不是列表。
+
+根据 `src/models/nb_vae.py:361-367`，NBVAE的正确签名是：
+```python
+def __init__(
+    self,
+    n_genes: int,
+    latent_dim: int,
+    n_tissues: int,
+    hidden_dim: int = 512  # 注意：单数，类型为int
+):
+```
+
+### 受影响文件
+通过 `Grep` 工具搜索发现以下文件使用了错误的参数名：
+1. `examples/complete_example.py:94`
+2. `scripts/profile_performance.py:88`
+3. `tests/test_integration.py:89, 564, 587`
+4. `docs/source/api/models.rst:50, 77-78`
+5. `docs/source/tutorials/index.rst:140`
+
+### 修复操作
+
+#### 修复1: examples/complete_example.py:94
+**修改前**:
+```python
+model = NBVAE(
+    n_genes=adata.n_vars,
+    latent_dim=32,
+    n_tissues=len(tissue2idx),
+    hidden_dims=[256, 128]
+)
+```
+
+**修改后**:
+```python
+model = NBVAE(
+    n_genes=adata.n_vars,
+    latent_dim=32,
+    n_tissues=len(tissue2idx),
+    hidden_dim=256  # 修复：应为hidden_dim（单数），类型为int
+)
+```
+
+#### 修复2: scripts/profile_performance.py:88
+**修改前**:
+```python
+model = NBVAE(
+    n_genes=1000,
+    latent_dim=32,
+    n_tissues=3,
+    hidden_dims=[256, 128]
+)
+```
+
+**修改后**:
+```python
+model = NBVAE(
+    n_genes=1000,
+    latent_dim=32,
+    n_tissues=3,
+    hidden_dim=256  # 修复：应为hidden_dim（单数），类型为int
+)
+```
+
+#### 修复3: tests/test_integration.py（3处）
+
+**第1处 (line 89)**:
+```python
+# 修改前
+hidden_dims=[64, 32]
+# 修改后
+hidden_dim=64  # 修复：应为hidden_dim（单数），类型为int
+```
+
+**第2处 (line 564)**:
+```python
+# 修改前
+hidden_dims=[64, 32]
+# 修改后
+hidden_dim=64  # 修复：应为hidden_dim（单数），类型为int
+```
+
+**第3处 (line 587)**:
+```python
+# 修改前
+hidden_dims=[64, 32]
+# 修改后
+hidden_dim=64  # 修复：应为hidden_dim（单数），类型为int
+```
+
+#### 修复4: docs/source/api/models.rst（2处）
+
+**第1处 (line 50) - 示例代码**:
+```python
+# 修改前
+model = NBVAE(
+    n_genes=2000,
+    latent_dim=32,
+    n_tissues=3,
+    hidden_dims=[256, 128]
+)
+
+# 修改后
+model = NBVAE(
+    n_genes=2000,
+    latent_dim=32,
+    n_tissues=3,
+    hidden_dim=256  # 隐藏层维度（整数）
+)
+```
+
+**第2处 (line 74-80) - 架构图**:
+修正架构图以反映实际实现：
+```
+修改前：
+x ∈ ℝ^G
+  ↓ [concat tissue]
+h ∈ ℝ^(G+T)
+  ↓ [MLP: hidden_dims]
+h_latent ∈ ℝ^hidden_dims[-1]
+  ├→ [Linear] → μ_z ∈ ℝ^d_z
+  └→ [Linear] → log σ²_z ∈ ℝ^d_z
+
+修改后：
+x ∈ ℝ^G
+  ↓ [Linear + ReLU]
+h ∈ ℝ^hidden_dim
+  ↓ [concat tissue]
+h_cat ∈ ℝ^(hidden_dim+T)
+  ├→ [Linear] → μ_z ∈ ℝ^d_z
+  └→ [Linear] → log σ²_z ∈ ℝ^d_z
+```
+
+#### 修复5: docs/source/tutorials/index.rst:140
+**修改前**:
+```python
+vae_model = NBVAE(
+    n_genes=adata.n_vars,
+    latent_dim=32,
+    n_tissues=len(tissue2idx),
+    hidden_dims=[256, 128]
+)
+```
+
+**修改后**:
+```python
+vae_model = NBVAE(
+    n_genes=adata.n_vars,
+    latent_dim=32,
+    n_tissues=len(tissue2idx),
+    hidden_dim=256  # 隐藏层维度（整数）
+)
+```
+
+### 修复模式
+所有修复遵循统一模式：
+- `hidden_dims=[256, 128]` → `hidden_dim=256`
+- `hidden_dims=[64, 32]` → `hidden_dim=64`
+
+**选择规则**: 当原参数为列表时，选择列表中的第一个值作为 `hidden_dim`
+
+### 实现逻辑对应
+根据 `src/models/nb_vae.py` 的实际实现：
+- Encoder 使用单一隐藏层维度（`hidden_dim`），而非多层MLP
+- 架构：`x → Linear(G, hidden_dim) → ReLU → concat(h, tissue) → Linear → (μ, logvar)`
+- 不支持多层隐藏维度列表
+
+### 复用的组件
+无（本次修复仅修改参数调用，未修改模型实现）
+
+### 验证清单
+- ✅ 所有文件中的 `hidden_dims` 已替换为 `hidden_dim`
+- ✅ 所有参数类型已从列表改为整数
+- ✅ 文档架构图已与实际实现对齐
+- ✅ 注释均使用简体中文
+
+### 修改统计
+- **代码文件**: 3个（共5处修改）
+  - examples/complete_example.py (1处)
+  - scripts/profile_performance.py (1处)
+  - tests/test_integration.py (3处)
+- **文档文件**: 2个（共3处修改）
+  - docs/source/api/models.rst (2处)
+  - docs/source/tutorials/index.rst (1处)
+
+### 风险评估
+
+**低风险**:
+- 参数名称修复完全匹配源代码定义
+- 向后兼容性无影响（错误的参数本来就无法运行）
+- 所有修改都是修复错误，不改变功能
+
+**需要注意**:
+- 如果用户之前保存了使用 `hidden_dims=[256, 128]` 训练的模型检查点，加载时需要使用 `hidden_dim=256`
+- 文档架构图的修正更准确地反映了实现，但可能与之前的理解不同
+
+### 测试建议
+建议用户在正确的Python环境中运行以下命令验证修复：
+
+```bash
+# 激活环境
+conda activate <your-env>
+
+# 运行示例
+python examples/complete_example.py
+
+# 运行测试
+pytest tests/test_integration.py -v
+
+# 运行性能分析
+python scripts/profile_performance.py
+```
+
+### 规范遵循
+
+**CLAUDE.md符合性**:
+- ✅ 所有注释使用简体中文
+- ✅ 代码标识符使用英文
+- ✅ 修复与 `src/models/nb_vae.py` 的实现100%一致
+- ✅ 记录了所有修改决策和理由
+- ✅ 工作文件写入 `.claude/` 目录
+
+**数学保真度**:
+- ✅ 未改变任何数学公式
+- ✅ 修复仅涉及参数调用，不影响模型行为
+
+---
+
+**操作者**: Claude Code
+**修复日期**: 2025-11-20
+**状态**: ✅ NBVAE参数错误修复完成
+
+---
+
+## 阶段6：NBVAE缺失实例属性修复
+
+### 修复时间
+2025-11-20（后续）
+
+### 问题发现
+用户在运行修复后的代码时，遇到新的错误：
+```
+AttributeError: 'NBVAE' object has no attribute 'n_genes'
+```
+
+### 问题分析
+虽然 `hidden_dims` → `hidden_dim` 参数问题已修复，但发现 NBVAE 的 `__init__` 方法存在另一个问题：
+- 方法接收了参数（n_genes, latent_dim, n_tissues, hidden_dim）
+- 但只是将这些参数传递给 encoder 和 decoder，**没有保存为实例属性**
+- 导致 `train_embed_core.py:146-148` 中访问 `model.n_genes` 等属性时失败
+
+### 受影响代码
+`src/train/train_embed_core.py:146-148`:
+```python
+"model_config": {
+    "n_genes": model.n_genes,       # ❌ AttributeError
+    "latent_dim": model.latent_dim, # ❌ AttributeError
+    "n_tissues": model.n_tissues,   # ❌ AttributeError
+}
+```
+
+### 修复操作
+
+#### 文件: src/models/nb_vae.py:361-377
+
+**修改前**:
+```python
+def __init__(
+    self,
+    n_genes: int,
+    latent_dim: int,
+    n_tissues: int,
+    hidden_dim: int = 512
+):
+    super().__init__()
+    self.encoder = Encoder(n_genes, latent_dim, n_tissues, hidden_dim)
+    self.decoder = DecoderNB(n_genes, latent_dim, n_tissues, hidden_dim)
+```
+
+**修改后**:
+```python
+def __init__(
+    self,
+    n_genes: int,
+    latent_dim: int,
+    n_tissues: int,
+    hidden_dim: int = 512
+):
+    super().__init__()
+    # 保存模型配置参数为实例属性
+    self.n_genes = n_genes
+    self.latent_dim = latent_dim
+    self.n_tissues = n_tissues
+    self.hidden_dim = hidden_dim
+
+    # 创建编码器和解码器
+    self.encoder = Encoder(n_genes, latent_dim, n_tissues, hidden_dim)
+    self.decoder = DecoderNB(n_genes, latent_dim, n_tissues, hidden_dim)
+```
+
+### 修复理由
+1. **训练代码依赖**: `train_embed_core.py` 需要访问模型配置参数以保存模型元数据
+2. **标准实践**: PyTorch 模型通常保存配置参数为实例属性，便于：
+   - 模型检查点的保存和加载
+   - 模型配置的导出
+   - 模型架构的检查和调试
+3. **向后兼容**: 保存这些属性不会破坏现有功能，只是添加了缺失的接口
+
+### 创建测试脚本
+为了便于验证修复，创建了完整的测试脚本：`test_nbvae_fix.py`
+
+测试内容：
+1. ✅ 验证NBVAE实例属性（n_genes, latent_dim, n_tissues, hidden_dim）
+2. ✅ 验证前向传播功能和输出形状
+3. ✅ 验证ELBO损失计算和梯度反向传播
+4. ✅ 验证模型配置访问（模拟train_embed_core.py的使用）
+5. ✅ 验证参数名称（hidden_dim vs hidden_dims）
+
+### 验证
+由于当前环境未安装PyTorch，执行了以下替代验证：
+- ✅ Python语法检查：`python -m py_compile src/models/nb_vae.py`
+- ✅ 示例代码语法检查：`python -m py_compile examples/complete_example.py`
+- ✅ 创建完整测试脚本供用户运行
+
+### 测试建议
+用户可以在正确的Python环境中运行以下命令验证修复：
+
+```bash
+# 方式1：运行专用测试脚本
+python test_nbvae_fix.py
+
+# 方式2：运行完整示例
+python examples/complete_example.py
+
+# 方式3：运行集成测试
+pytest tests/test_integration.py -v -k "test_vae"
+```
+
+### 修复影响范围
+- **修改文件**: 1个
+  - `src/models/nb_vae.py` (添加4行实例属性)
+- **新增文件**: 1个
+  - `test_nbvae_fix.py` (完整测试脚本)
+- **影响范围**: 低风险
+  - 仅添加缺失的属性，不改变现有行为
+  - 所有现有代码仍能正常工作
+  - 修复了访问这些属性的代码路径
+
+### 复用的组件
+- `Encoder` 和 `DecoderNB`: 继续使用现有的编码器和解码器类
+- PyTorch的`nn.Module`: 标准模型基类
+
+### 规范遵循
+
+**CLAUDE.md符合性**:
+- ✅ 所有注释使用简体中文
+- ✅ 代码标识符使用英文
+- ✅ 修复遵循PyTorch标准实践
+- ✅ 记录了所有修改决策和理由
+- ✅ 工作文件写入 `.claude/` 目录
+
+**数学保真度**:
+- ✅ 未改变任何数学公式或计算逻辑
+- ✅ 修复仅添加属性保存，不影响模型行为
+
+### 完成检查清单
+- ✅ 添加了 n_genes 属性
+- ✅ 添加了 latent_dim 属性
+- ✅ 添加了 n_tissues 属性
+- ✅ 添加了 hidden_dim 属性
+- ✅ 添加了简体中文注释
+- ✅ 创建了完整测试脚本
+- ✅ 验证了代码语法正确性
+
+---
+
+**操作者**: Claude Code
+**修复日期**: 2025-11-20
+**状态**: ✅ NBVAE实例属性缺失问题修复完成

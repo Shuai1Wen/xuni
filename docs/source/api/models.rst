@@ -47,7 +47,7 @@ NBVAE
           n_genes=2000,
           latent_dim=32,
           n_tissues=3,
-          hidden_dims=[256, 128]
+          hidden_dim=256  # 隐藏层维度（整数）
       )
 
       # 前向传播
@@ -72,10 +72,10 @@ Encoder
    .. code-block:: text
 
       x ∈ ℝ^G
+        ↓ [Linear + ReLU]
+      h ∈ ℝ^hidden_dim
         ↓ [concat tissue]
-      h ∈ ℝ^(G+T)
-        ↓ [MLP: hidden_dims]
-      h_latent ∈ ℝ^hidden_dims[-1]
+      h_cat ∈ ℝ^(hidden_dim+T)
         ├→ [Linear] → μ_z ∈ ℝ^d_z
         └→ [Linear] → log σ²_z ∈ ℝ^d_z
 

@@ -91,7 +91,7 @@ def example_1_train_vae():
         n_genes=adata.n_vars,
         latent_dim=32,
         n_tissues=len(tissue2idx),
-        hidden_dims=[256, 128]
+        hidden_dim=256  # 修复：应为hidden_dim（单数），类型为int
     )
     
     # 训练配置
