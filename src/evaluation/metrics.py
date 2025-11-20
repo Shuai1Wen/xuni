@@ -14,6 +14,7 @@
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Tuple, Optional
 from sklearn.metrics import roc_auc_score, average_precision_score
@@ -133,11 +134,13 @@ def distribution_metrics(
     mean_dist = torch.norm(mean_true - mean_pred).item()
     metrics["mean_l2_dist"] = mean_dist
 
-    # 协方差距离
+    # 协方差距离（防止除零：当batch_size=1时，使用1代替0）
     z_true_centered = z_true - mean_true
     z_pred_centered = z_pred - mean_pred
-    cov_true = (z_true_centered.T @ z_true_centered) / (z_true.shape[0] - 1)
-    cov_pred = (z_pred_centered.T @ z_pred_centered) / (z_pred.shape[0] - 1)
+    n_true = max(z_true.shape[0] - 1, 1)
+    n_pred = max(z_pred.shape[0] - 1, 1)
+    cov_true = (z_true_centered.T @ z_true_centered) / n_true
+    cov_pred = (z_pred_centered.T @ z_pred_centered) / n_pred
     cov_dist = torch.norm(cov_true - cov_pred, p='fro').item()
     metrics["cov_frobenius_dist"] = cov_dist
 
@@ -196,13 +199,14 @@ def de_gene_prediction_metrics(
     B, G = x0.shape
 
     # 计算log2 fold change（平均across细胞）
-    # 添加pseudocount避免log(0)
-    mean_x0 = x0_np.mean(axis=0) + eps
-    mean_x1_true = x1_true_np.mean(axis=0) + eps
-    mean_x1_pred = x1_pred_np.mean(axis=0) + eps
+    # 注意：在log内部添加pseudocount避免引入bias
+    mean_x0 = x0_np.mean(axis=0)
+    mean_x1_true = x1_true_np.mean(axis=0)
+    mean_x1_pred = x1_pred_np.mean(axis=0)
 
-    log2fc_true = np.log2(mean_x1_true / mean_x0)
-    log2fc_pred = np.log2(mean_x1_pred / mean_x0)
+    # 在除法和log操作中同时添加eps，保持比例关系
+    log2fc_true = np.log2((mean_x1_true + eps) / (mean_x0 + eps))
+    log2fc_pred = np.log2((mean_x1_pred + eps) / (mean_x0 + eps))
 
     # 计算DE分数（这里使用|log2FC|）
     de_score_true = np.abs(log2fc_true)
@@ -370,18 +374,21 @@ def comprehensive_evaluation(
             tissue_idx = batch["tissue_idx"].to(device)
             cond_vec = batch["cond_vec"].to(device)
 
+            # 转换tissue_idx为one-hot编码
+            tissue_onehot = F.one_hot(tissue_idx, num_classes=vae_model.n_tissues).float()
+
             # 编码 x0 → z0
-            mu0, _ = vae_model.encoder(x0, tissue_idx)
+            mu0, _ = vae_model.encoder(x0, tissue_onehot)
             z0 = mu0  # 使用均值
 
-            # 应用算子 z0 → z1_pred
-            z1_pred = operator_model(z0, tissue_idx, cond_vec)
+            # 应用算子 z0 → z1_pred（operator返回3个值）
+            z1_pred, _, _ = operator_model(z0, tissue_idx, cond_vec)
 
-            # 解码 z1_pred → x1_pred
-            x1_pred = vae_model.decoder.get_mean(z1_pred, tissue_idx)
+            # 解码 z1_pred → x1_pred（decoder.forward返回(mu, r)）
+            x1_pred, _ = vae_model.decoder(z1_pred, tissue_onehot)
 
             # 真实z1（用于分布指标）
-            mu1, _ = vae_model.encoder(x1, tissue_idx)
+            mu1, _ = vae_model.encoder(x1, tissue_onehot)
             z1_true = mu1
 
             all_x0.append(x0.cpu())

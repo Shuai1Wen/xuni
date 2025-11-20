@@ -17,6 +17,7 @@
 
 import argparse
 import torch
+import torch.nn.functional as F
 import scanpy as sc
 from pathlib import Path
 import json
@@ -99,7 +100,9 @@ def load_models(vae_checkpoint_path: str, operator_checkpoint_path: str, encoder
         tissue2idx=encoder_checkpoint["tissue2idx"],
         batch2idx=encoder_checkpoint["batch2idx"],
         cond_dim=encoder_checkpoint["config"]["cond_dim"],
-        use_embedding=encoder_checkpoint["config"]["use_embedding"]
+        use_embedding=encoder_checkpoint["config"]["use_embedding"],
+        perturb_embed_dim=encoder_checkpoint["config"].get("perturb_embed_dim", 16),
+        tissue_embed_dim=encoder_checkpoint["config"].get("tissue_embed_dim", 8)
     )
     cond_encoder.load_state_dict(encoder_checkpoint["state_dict"])
     cond_encoder.to(device)
@@ -154,18 +157,21 @@ def evaluate_model(
             tissue_idx = batch["tissue_idx"].to(device)
             cond_vec = batch["cond_vec"].to(device)
 
+            # 转换tissue_idx为one-hot编码
+            tissue_onehot = F.one_hot(tissue_idx, num_classes=vae_model.n_tissues).float()
+
             # 编码 x0 → z0
-            mu0, _ = vae_model.encoder(x0, tissue_idx)
+            mu0, _ = vae_model.encoder(x0, tissue_onehot)
             z0 = mu0  # 使用均值
 
-            # 应用算子 z0 → z1_pred
-            z1_pred = operator_model(z0, tissue_idx, cond_vec)
+            # 应用算子 z0 → z1_pred（operator返回3个值）
+            z1_pred, _, _ = operator_model(z0, tissue_idx, cond_vec)
 
-            # 解码 z1_pred → x1_pred
-            x1_pred = vae_model.decoder.get_mean(z1_pred, tissue_idx)
+            # 解码 z1_pred → x1_pred（decoder.forward返回(mu, r)）
+            x1_pred, _ = vae_model.decoder(z1_pred, tissue_onehot)
 
             # 真实z1（用于分布指标）
-            mu1, _ = vae_model.encoder(x1, tissue_idx)
+            mu1, _ = vae_model.encoder(x1, tissue_onehot)
             z1_true = mu1
 
             # 计算谱范数
@@ -304,14 +310,14 @@ def generate_visualizations(all_metrics, predictions, output_dir: Path):
     # 3. 差异基因散点图
     if "de_genes" in all_metrics:
         print("  - 差异基因散点图")
-        # 计算log2FC
+        # 计算log2FC（在log内部添加pseudocount避免bias）
         eps = 1e-8
-        mean_x0 = predictions["x0"].mean(axis=0) + eps
-        mean_x1_true = predictions["x1_true"].mean(axis=0) + eps
-        mean_x1_pred = predictions["x1_pred"].mean(axis=0) + eps
+        mean_x0 = predictions["x0"].mean(axis=0)
+        mean_x1_true = predictions["x1_true"].mean(axis=0)
+        mean_x1_pred = predictions["x1_pred"].mean(axis=0)
 
-        log2fc_true = np.log2(mean_x1_true / mean_x0)
-        log2fc_pred = np.log2(mean_x1_pred / mean_x0)
+        log2fc_true = np.log2((mean_x1_true + eps) / (mean_x0 + eps))
+        log2fc_pred = np.log2((mean_x1_pred + eps) / (mean_x0 + eps))
 
         plot_de_genes_scatter(
             log2fc_true,

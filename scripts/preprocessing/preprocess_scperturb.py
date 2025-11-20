@@ -119,9 +119,10 @@ def split_data_by_condition(adata, test_split=0.15, val_split=0.15, seed=42):
     np.random.seed(seed)
 
     # 获取所有唯一条件（扰动+组织+细胞类型）
+    # 使用"||"作为分隔符避免扰动名称中的"_"干扰
     adata.obs["condition_key"] = (
-        adata.obs["perturbation"].astype(str) + "_" +
-        adata.obs["tissue"].astype(str) + "_" +
+        adata.obs["perturbation"].astype(str) + "||" +
+        adata.obs["tissue"].astype(str) + "||" +
         adata.obs.get("cell_type", "unknown").astype(str)
     )
 

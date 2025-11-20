@@ -235,7 +235,9 @@ class ConditionEncoder(nn.Module):
         cls,
         adata,
         cond_dim: int = 64,
-        use_embedding: bool = True
+        use_embedding: bool = True,
+        perturb_embed_dim: int = 16,
+        tissue_embed_dim: int = 8
     ) -> "ConditionEncoder":
         """
         从AnnData对象自动构建ConditionEncoder
@@ -246,6 +248,8 @@ class ConditionEncoder(nn.Module):
             adata: AnnData对象
             cond_dim: 条件向量维度
             use_embedding: 是否使用embedding
+            perturb_embed_dim: 扰动embedding维度
+            tissue_embed_dim: 组织embedding维度
 
         返回:
             encoder: ConditionEncoder实例
@@ -279,5 +283,7 @@ class ConditionEncoder(nn.Module):
             tissue2idx,
             batch2idx,
             cond_dim=cond_dim,
-            use_embedding=use_embedding
+            use_embedding=use_embedding,
+            perturb_embed_dim=perturb_embed_dim,
+            tissue_embed_dim=tissue_embed_dim
         )

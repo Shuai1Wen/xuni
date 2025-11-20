@@ -146,6 +146,7 @@ def save_checkpoint(model, optimizer, epoch, history, path):
             "n_genes": model.n_genes,
             "latent_dim": model.latent_dim,
             "n_tissues": model.n_tissues,
+            "hidden_dim": model.hidden_dim,
         },
     }
     torch.save(checkpoint, path)

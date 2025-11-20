@@ -81,7 +81,9 @@ def load_models(vae_checkpoint_path, operator_checkpoint_path, encoder_checkpoin
         tissue2idx=encoder_checkpoint["tissue2idx"],
         batch2idx=encoder_checkpoint["batch2idx"],
         cond_dim=encoder_checkpoint["config"]["cond_dim"],
-        use_embedding=encoder_checkpoint["config"]["use_embedding"]
+        use_embedding=encoder_checkpoint["config"]["use_embedding"],
+        perturb_embed_dim=encoder_checkpoint["config"].get("perturb_embed_dim", 16),
+        tissue_embed_dim=encoder_checkpoint["config"].get("tissue_embed_dim", 8)
     )
     cond_encoder.load_state_dict(encoder_checkpoint["state_dict"])
     cond_encoder.to(device)
@@ -121,9 +123,9 @@ def compute_activation_matrix(operator_model, cond_encoder, adata, tissue2idx, d
     """
     print("\n计算激活模式...")
 
-    # 获取所有唯一条件
+    # 获取所有唯一条件（使用"||"作为分隔符避免扰动名称中的"_"干扰）
     adata.obs["condition_key"] = (
-        adata.obs["perturbation"].astype(str) + "_" +
+        adata.obs["perturbation"].astype(str) + "||" +
         adata.obs["tissue"].astype(str)
     )
     unique_conditions = adata.obs["condition_key"].unique()
@@ -132,8 +134,8 @@ def compute_activation_matrix(operator_model, cond_encoder, adata, tissue2idx, d
     condition_names = []
 
     for cond_key in unique_conditions:
-        # 解析条件
-        parts = cond_key.split("_")
+        # 解析条件（使用"||"分隔）
+        parts = cond_key.split("||")
         if len(parts) >= 2:
             perturbation = parts[0]
             tissue = parts[1]

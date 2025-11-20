@@ -220,7 +220,9 @@ def train_operator_phase(args):
     cond_encoder = ConditionEncoder.from_anndata(
         adata_train,
         cond_dim=config["model"]["cond_dim"],
-        use_embedding=config["cond_encoder"]["use_embedding"]
+        use_embedding=config["cond_encoder"]["use_embedding"],
+        perturb_embed_dim=config["cond_encoder"]["perturb_embed_dim"],
+        tissue_embed_dim=config["cond_encoder"]["tissue_embed_dim"]
     )
     print(f"扰动类型数量: {len(cond_encoder.perturb2idx)}")
     print(f"条件向量维度: {config['model']['cond_dim']}")
@@ -313,7 +315,9 @@ def train_operator_phase(args):
         "state_dict": cond_encoder.state_dict(),
         "config": {
             "cond_dim": config["model"]["cond_dim"],
-            "use_embedding": config["cond_encoder"]["use_embedding"]
+            "use_embedding": config["cond_encoder"]["use_embedding"],
+            "perturb_embed_dim": config["cond_encoder"]["perturb_embed_dim"],
+            "tissue_embed_dim": config["cond_encoder"]["tissue_embed_dim"]
         }
     }, encoder_path)
     print(f"条件编码器已保存至: {encoder_path}")
