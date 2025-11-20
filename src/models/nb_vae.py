@@ -366,6 +366,13 @@ class NBVAE(nn.Module):
         hidden_dim: int = 512
     ):
         super().__init__()
+        # 保存模型配置参数为实例属性
+        self.n_genes = n_genes
+        self.latent_dim = latent_dim
+        self.n_tissues = n_tissues
+        self.hidden_dim = hidden_dim
+
+        # 创建编码器和解码器
         self.encoder = Encoder(n_genes, latent_dim, n_tissues, hidden_dim)
         self.decoder = DecoderNB(n_genes, latent_dim, n_tissues, hidden_dim)
 
