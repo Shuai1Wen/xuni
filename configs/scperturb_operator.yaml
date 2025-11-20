@@ -1,0 +1,40 @@
+# scPerturb算子训练配置
+# 对应：model.md A.5节（算子低秩分解）+ A.7节（稳定性约束）
+
+model:
+  latent_dim: 32                # 潜空间维度 d_z（必须与VAE一致）
+  n_tissues: 1                  # 组织类型数量
+  n_response_bases: 5           # 响应基数量 K
+  cond_dim: 64                  # 条件向量维度
+  max_spectral_norm: 1.05       # 谱范数上界约束
+
+training:
+  lr_operator: 0.001            # 算子学习率
+  batch_size: 256               # 批次大小（算子训练batch可以小一些）
+  n_epochs_operator: 100        # 算子训练轮数
+  lambda_e: 1.0                 # E-distance损失权重
+  lambda_stab: 0.001            # 稳定性正则化权重
+  gradient_clip: 1.0            # 梯度裁剪阈值
+  freeze_vae: true              # 是否冻结VAE参数
+
+data:
+  data_path: data/processed/scperturb/scperturb_merged_train.h5ad
+  val_data_path: data/processed/scperturb/scperturb_merged_val.h5ad
+  test_data_path: data/processed/scperturb/scperturb_merged_test.h5ad
+  min_pairs_per_condition: 50   # 每个条件最少配对数
+
+experiment:
+  seed: 42                      # 随机种子
+  device: cuda                  # 设备（cuda或cpu）
+  num_workers: 4                # 数据加载线程数
+  save_checkpoints: true        # 是否保存检查点
+  checkpoint_freq: 10           # 检查点保存频率（每N个epoch）
+  checkpoint_dir: results/checkpoints/scperturb_operator/
+  log_dir: results/logs/scperturb_operator/
+  vae_checkpoint: results/checkpoints/scperturb_vae/best_model.pt
+
+# 条件编码器配置
+cond_encoder:
+  use_embedding: true           # 使用learned embedding而非one-hot
+  perturb_embed_dim: 16         # 扰动embedding维度
+  tissue_embed_dim: 8           # 组织embedding维度

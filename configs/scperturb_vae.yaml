@@ -1,0 +1,33 @@
+# scPerturb VAE训练配置
+# 对应：model.md A.2节（VAE模型）
+
+model:
+  n_genes: 2000              # 基因数量（预处理后的高变基因）
+  latent_dim: 32             # 潜空间维度 d_z
+  n_tissues: 1               # 组织类型数量（scPerturb主要是血液细胞）
+  hidden_dim: 512            # 编码器/解码器隐藏层维度
+
+training:
+  lr_embed: 0.001            # VAE学习率
+  batch_size: 512            # 批次大小
+  n_epochs_embed: 100        # VAE训练轮数
+  gradient_clip: 1.0         # 梯度裁剪阈值
+  beta_kl: 1.0               # KL散度权重（β-VAE）
+  warmup_epochs: 10          # KL warmup轮数
+
+data:
+  data_path: data/processed/scperturb/scperturb_merged_train.h5ad
+  val_data_path: data/processed/scperturb/scperturb_merged_val.h5ad
+  test_data_path: data/processed/scperturb/scperturb_merged_test.h5ad
+  min_cells: 100             # 每个条件最少细胞数
+  min_genes: 200             # 细胞最少表达基因数
+  n_top_genes: 2000          # 高变基因数量
+
+experiment:
+  seed: 42                   # 随机种子
+  device: cuda               # 设备（cuda或cpu）
+  num_workers: 4             # 数据加载线程数
+  save_checkpoints: true     # 是否保存检查点
+  checkpoint_freq: 10        # 检查点保存频率（每N个epoch）
+  checkpoint_dir: results/checkpoints/scperturb_vae/
+  log_dir: results/logs/scperturb_vae/
