@@ -59,11 +59,27 @@ def train_embedding(
             tissue_onehot = batch["tissue_onehot"].to(device)
             
             loss, loss_dict = elbo_loss(x, tissue_onehot, model, beta=beta)
-            
+
+            # 检测NaN/Inf：在backward前检查，便于诊断
+            if torch.isnan(loss) or torch.isinf(loss):
+                logger.error(f"Epoch {epoch+1}, Batch {pbar.n}: 检测到NaN/Inf在损失中")
+                logger.error(f"重建损失: {loss_dict['recon_loss']:.4f}")
+                logger.error(f"KL损失: {loss_dict['kl_loss']:.4f}")
+                logger.error(f"Beta: {beta:.4f}")
+                raise RuntimeError("数值不稳定：损失为NaN或Inf，训练终止")
+
             optimizer.zero_grad()
             loss.backward()
+
+            # 检查梯度是否包含NaN（在裁剪前检查，便于诊断）
             if config.gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                # 计算总梯度范数用于监控
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+                if torch.isnan(total_norm) or torch.isinf(total_norm):
+                    logger.error(f"Epoch {epoch+1}, Batch {pbar.n}: 检测到NaN/Inf在梯度中")
+                    logger.error(f"损失值: {loss.item():.4f}")
+                    raise RuntimeError("数值不稳定：梯度包含NaN或Inf，训练终止")
+
             optimizer.step()
             
             batch_size = x.size(0)
