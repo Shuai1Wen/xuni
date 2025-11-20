@@ -86,7 +86,7 @@ class TestCompleteVAETraining:
             n_genes=100,
             latent_dim=16,
             n_tissues=2,
-            hidden_dims=[64, 32]
+            hidden_dim=64  # 修复：应为hidden_dim（单数），类型为int
         ).to(device)
 
         # 训练配置
@@ -561,7 +561,7 @@ class TestModelSaveLoad:
             n_genes=100,
             latent_dim=16,
             n_tissues=2,
-            hidden_dims=[64, 32]
+            hidden_dim=64  # 修复：应为hidden_dim（单数），类型为int
         ).to(device)
 
         # 随机输入
@@ -584,7 +584,7 @@ class TestModelSaveLoad:
                 n_genes=100,
                 latent_dim=16,
                 n_tissues=2,
-                hidden_dims=[64, 32]
+                hidden_dim=64  # 修复：应为hidden_dim（单数），类型为int
             ).to(device)
             model_loaded.load_state_dict(torch.load(save_path))
             model_loaded.eval()

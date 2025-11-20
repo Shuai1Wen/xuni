@@ -85,7 +85,7 @@ def profile_vae_training(device="cpu", n_steps=10):
         n_genes=1000,
         latent_dim=32,
         n_tissues=3,
-        hidden_dims=[256, 128]
+        hidden_dim=256  # 修复：应为hidden_dim（单数），类型为int
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)

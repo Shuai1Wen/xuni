@@ -137,7 +137,7 @@
        n_genes=adata.n_vars,
        latent_dim=32,
        n_tissues=len(tissue2idx),
-       hidden_dims=[256, 128]
+       hidden_dim=256  # 隐藏层维度（整数）
    ).to(device)
 
    vae_config = TrainingConfig(
