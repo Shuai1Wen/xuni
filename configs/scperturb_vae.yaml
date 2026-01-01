@@ -6,6 +6,7 @@ model:
   latent_dim: 32             # 潜空间维度 d_z
   n_tissues: 1               # 组织类型数量（scPerturb主要是血液细胞）
   hidden_dim: 512            # 编码器/解码器隐藏层维度
+  likelihood: nb             # nb | gaussian
 
 training:
   lr_embed: 0.001            # VAE学习率
@@ -19,6 +20,7 @@ data:
   data_path: data/processed/scperturb/scperturb_merged_train.h5ad
   val_data_path: data/processed/scperturb/scperturb_merged_val.h5ad
   test_data_path: data/processed/scperturb/scperturb_merged_test.h5ad
+  input_representation: counts  # counts | log
   min_cells: 100             # 每个条件最少细胞数
   min_genes: 200             # 细胞最少表达基因数
   n_top_genes: 2000          # 高变基因数量

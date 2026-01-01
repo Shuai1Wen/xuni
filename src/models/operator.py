@@ -33,7 +33,7 @@ class OperatorModel(nn.Module):
     """
     扰动响应算子模型（低秩结构）
 
-    实现算子族：K_θ(z) = A_θz + b_θ，其中：
+    实现算子族：K_θ(z) = z + g(θ) ⊙ (A_θz + b_θ)，其中：
         A_θ = A_t^(0) + Σ_{k=1}^K α_k(θ) B_k
         b_θ = b_t^(0) + Σ_{k=1}^K β_k(θ) u_k
 
@@ -112,18 +112,25 @@ class OperatorModel(nn.Module):
         self.u = nn.Parameter(torch.randn(self.K, latent_dim) * 0.01)
 
         # 用小网络从条件向量 θ 预测 α_k(θ) 和 β_k(θ)
-        # α_k(θ)：响应基B_k的激活强度
+        # α_k(θ)：响应基B_k的激活强度（softmax确保凸组合）
         self.alpha_mlp = nn.Sequential(
             nn.Linear(cond_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.K)
         )
 
-        # β_k(θ)：平移基u_k的激活强度
+        # β_k(θ)：平移基u_k的激活强度（softmax确保凸组合）
         self.beta_mlp = nn.Sequential(
             nn.Linear(cond_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.K)
+        )
+
+        # 门控：控制扰动增量强度，确保弱扰动接近恒等映射
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(cond_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
         )
 
     def forward(
@@ -151,7 +158,7 @@ class OperatorModel(nn.Module):
             3. 组合响应基：
                A_θ = A_t^(0) + Σ_k α_k(θ) B_k
                b_θ = b_t^(0) + Σ_k β_k(θ) u_k
-            4. 应用算子：z_out = A_θz + b_θ
+        4. 残差门控：z_out = z + g(θ) ⊙ (A_θz + b_θ)
 
         数学对应：
             - model.md A.3节：K_θ(z)定义
@@ -177,10 +184,10 @@ class OperatorModel(nn.Module):
 
         # 1. 计算响应基的激活系数
         # α_k(θ): (B, K) - 线性响应基的权重
-        alpha = self.alpha_mlp(cond_vec)  # (B, K)
+        alpha = F.softmax(self.alpha_mlp(cond_vec), dim=-1)  # (B, K)
 
         # β_k(θ): (B, K) - 平移响应基的权重
-        beta = self.beta_mlp(cond_vec)    # (B, K)
+        beta = F.softmax(self.beta_mlp(cond_vec), dim=-1)    # (B, K)
 
         # 2. 获取对应组织的基线算子
         # A_t^(0): (B, d, d)
@@ -212,12 +219,24 @@ class OperatorModel(nn.Module):
         # 最终平移：b_θ = b_t^(0) + Σ β_k u_k
         b_theta = b0 + b_res  # (B, d)
 
-        # 5. 应用算子：z_out = A_θz + b_θ
-        # 使用bmm进行批量矩阵乘法
-        # (B, d, d) @ (B, d, 1) → (B, d, 1) → squeeze → (B, d)
-        z_out = torch.bmm(A_theta, z.unsqueeze(-1)).squeeze(-1) + b_theta  # (B, d)
+        # 5. 残差 + 门控：z_out = z + g * (A_θz + b_θ)
+        gate = torch.sigmoid(self.gate_mlp(cond_vec)).squeeze(-1)  # (B,)
+        delta = torch.bmm(A_theta, z.unsqueeze(-1)).squeeze(-1) + b_theta  # (B, d)
+        z_out = z + gate.unsqueeze(-1) * delta  # (B, d)
 
         return z_out, A_theta, b_theta
+
+    def compute_gate(self, cond_vec: torch.Tensor) -> torch.Tensor:
+        """
+        计算门控值 g(θ)
+
+        参数:
+            cond_vec: (B, cond_dim) 条件向量
+
+        返回:
+            gate: (B,) 门控强度，范围[0,1]
+        """
+        return torch.sigmoid(self.gate_mlp(cond_vec)).squeeze(-1)
 
     def spectral_penalty(
         self,
@@ -314,6 +333,33 @@ class OperatorModel(nn.Module):
             penalty = penalty + F.relu(excess) ** 2
 
         return penalty
+
+    def spectral_penalty_batch(
+        self,
+        A_theta: torch.Tensor,
+        max_allowed: float = 1.05,
+        n_iterations: int = 2
+    ) -> torch.Tensor:
+        """
+        针对样本级算子A_θ的谱范数惩罚
+
+        参数:
+            A_theta: (B, d, d) 每个样本的算子矩阵
+            max_allowed: 允许的最大谱范数
+            n_iterations: power iteration迭代次数（建议1-2）
+        """
+        B, d, _ = A_theta.shape
+        with torch.no_grad():
+            v = torch.randn(B, d, device=A_theta.device)
+            v = v / (v.norm(dim=1, keepdim=True) + _NUM_CFG.eps_division)
+        for _ in range(n_iterations):
+            Av = torch.bmm(A_theta, v.unsqueeze(-1)).squeeze(-1)
+            v = torch.bmm(A_theta.transpose(1, 2), Av.unsqueeze(-1)).squeeze(-1)
+            v = v / (v.norm(dim=1, keepdim=True) + _NUM_CFG.eps_division)
+        Av = torch.bmm(A_theta, v.unsqueeze(-1)).squeeze(-1)
+        spec = torch.sqrt((Av * Av).sum(dim=1).abs() + _NUM_CFG.eps_log)
+        excess = spec - max_allowed
+        return torch.mean(F.relu(excess) ** 2)
 
     def get_response_profile(
         self,

@@ -113,6 +113,15 @@ class TrainingConfig:
     n_epochs_operator: int = 100
     lambda_e: float = 1.0      # weight for E-distance
     lambda_stab: float = 1e-3  # weight for stability regularization
+    lambda_delta: float = 1.0
+    lambda_cons: float = 0.1
+    edist_max_exact_batch: int = 256
+    lr_embed_finetune: float = 1e-5
+    finetune_scope: str = "none"  # none | partial | all
+    finetune_start_epoch: int = -1
+    spectral_penalty_iters: int = 2
+    lambda_gate_control: float = 0.1
+    control_perturbations: List[str] = field(default_factory=lambda: ["control"])
     gradient_clip: float = 1.0
     beta_kl: float = 1.0
     warmup_epochs: int = 0

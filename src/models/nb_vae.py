@@ -381,6 +381,7 @@ class NBVAE(nn.Module):
         self.latent_dim = latent_dim
         self.n_tissues = n_tissues
         self.hidden_dim = hidden_dim
+        self.likelihood = "nb"
 
         # 创建编码器和解码器
         self.encoder = Encoder(n_genes, latent_dim, n_tissues, hidden_dim)
@@ -420,6 +421,74 @@ class NBVAE(nn.Module):
         mu_x, r_x = self.decoder(z, tissue_onehot)
 
         return z, mu_x, r_x, mu_z, logvar_z
+
+
+class DecoderGaussian(nn.Module):
+    """
+    高斯解码器
+
+    实现 p_ψ(x|z,t) = N(μ(z,t), diag(σ²))
+    """
+
+    def __init__(
+        self,
+        n_genes: int,
+        latent_dim: int,
+        n_tissues: int,
+        hidden_dim: int = 512
+    ):
+        super().__init__()
+        self.n_genes = n_genes
+        self.latent_dim = latent_dim
+        self.n_tissues = n_tissues
+        self.hidden_dim = hidden_dim
+
+        self.fc = nn.Linear(latent_dim + n_tissues, hidden_dim)
+        self.fc_mu = nn.Linear(hidden_dim, n_genes)
+        self.logvar = nn.Parameter(torch.zeros(n_genes))
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        tissue_onehot: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = F.relu(self.fc(torch.cat([z, tissue_onehot], dim=-1)))
+        mu = self.fc_mu(h)
+        logvar = self.logvar.unsqueeze(0).expand_as(mu)
+        return mu, logvar
+
+
+class GaussianVAE(nn.Module):
+    """
+    高斯变分自编码器（用于log-normalized数据）
+    """
+
+    def __init__(
+        self,
+        n_genes: int,
+        latent_dim: int,
+        n_tissues: int,
+        hidden_dim: int = 512
+    ):
+        super().__init__()
+        self.n_genes = n_genes
+        self.latent_dim = latent_dim
+        self.n_tissues = n_tissues
+        self.hidden_dim = hidden_dim
+        self.likelihood = "gaussian"
+
+        self.encoder = Encoder(n_genes, latent_dim, n_tissues, hidden_dim)
+        self.decoder = DecoderGaussian(n_genes, latent_dim, n_tissues, hidden_dim)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        tissue_onehot: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        mu_z, logvar_z = self.encoder(x, tissue_onehot)
+        z = sample_z(mu_z, logvar_z)
+        mu_x, logvar_x = self.decoder(z, tissue_onehot)
+        return z, mu_x, logvar_x, mu_z, logvar_z
 
 
 def elbo_loss(
@@ -495,4 +564,34 @@ def elbo_loss(
         "z": z.detach()  # 用于下游任务
     }
 
+    return loss, loss_dict
+
+
+def gaussian_elbo_loss(
+    x: torch.Tensor,
+    tissue_onehot: torch.Tensor,
+    model: GaussianVAE,
+    beta: float = 1.0
+) -> Tuple[torch.Tensor, dict]:
+    """
+    高斯VAE的ELBO损失
+    """
+    z, mu_x, logvar_x, mu_z, logvar_z = model(x, tissue_onehot)
+
+    recon = 0.5 * (logvar_x + (x - mu_x) ** 2 / torch.exp(logvar_x + _NUM_CFG.eps_log))
+    recon_loss = recon.sum(dim=-1).mean()
+
+    logvar_z_clamped = torch.clamp(logvar_z, min=-10.0, max=10.0)
+    kl = -0.5 * torch.sum(
+        1 + logvar_z_clamped - mu_z.pow(2) - logvar_z_clamped.exp(),
+        dim=-1
+    )
+    kl_loss = kl.mean()
+    loss = recon_loss + beta * kl_loss
+
+    loss_dict = {
+        "recon_loss": recon_loss.detach(),
+        "kl_loss": kl_loss.detach(),
+        "z": z.detach()
+    }
     return loss, loss_dict

@@ -29,7 +29,7 @@ from torch.utils.data import DataLoader
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.models.nb_vae import NBVAE
+from src.models.nb_vae import NBVAE, GaussianVAE
 from src.models.operator import OperatorModel
 from src.utils.cond_encoder import ConditionEncoder
 from src.data.scperturb_dataset import SCPerturbPairDataset, collate_fn_pair
@@ -38,7 +38,9 @@ from src.evaluation.metrics import (
     distribution_metrics,
     de_gene_prediction_metrics,
     operator_quality_metrics,
-    comprehensive_evaluation
+    comprehensive_evaluation,
+    pca_energy_distance,
+    perturbation_shift_metrics
 )
 from src.visualization.plotting import (
     plot_latent_space_umap,
@@ -68,12 +70,21 @@ def load_models(vae_checkpoint_path: str, operator_checkpoint_path: str, encoder
 
     # 加载VAE
     vae_checkpoint = torch.load(vae_checkpoint_path, map_location=device)
-    vae_model = NBVAE(
-        n_genes=vae_checkpoint["model_config"]["n_genes"],
-        latent_dim=vae_checkpoint["model_config"]["latent_dim"],
-        n_tissues=vae_checkpoint["model_config"]["n_tissues"],
-        hidden_dim=vae_checkpoint["model_config"]["hidden_dim"]
-    )
+    likelihood = vae_checkpoint["model_config"].get("likelihood", "nb")
+    if likelihood == "gaussian":
+        vae_model = GaussianVAE(
+            n_genes=vae_checkpoint["model_config"]["n_genes"],
+            latent_dim=vae_checkpoint["model_config"]["latent_dim"],
+            n_tissues=vae_checkpoint["model_config"]["n_tissues"],
+            hidden_dim=vae_checkpoint["model_config"]["hidden_dim"]
+        )
+    else:
+        vae_model = NBVAE(
+            n_genes=vae_checkpoint["model_config"]["n_genes"],
+            latent_dim=vae_checkpoint["model_config"]["latent_dim"],
+            n_tissues=vae_checkpoint["model_config"]["n_tissues"],
+            hidden_dim=vae_checkpoint["model_config"]["hidden_dim"]
+        )
     vae_model.load_state_dict(vae_checkpoint["model_state_dict"])
     vae_model.to(device)
     vae_model.eval()
@@ -146,6 +157,7 @@ def evaluate_model(
     all_tissue_idx = []
     all_cond_vec = []
     all_spectral_norms = []
+    all_perturbations = []
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -156,6 +168,7 @@ def evaluate_model(
             x1 = batch["x1"].to(device)
             tissue_idx = batch["tissue_idx"].to(device)
             cond_vec = batch["cond_vec"].to(device)
+            perturbations = batch["perturbation"]
 
             # 转换tissue_idx为one-hot编码
             tissue_onehot = F.one_hot(tissue_idx, num_classes=vae_model.n_tissues).float()
@@ -186,6 +199,7 @@ def evaluate_model(
             all_tissue_idx.append(tissue_idx.cpu())
             all_cond_vec.append(cond_vec.cpu())
             all_spectral_norms.append(norms.cpu())
+            all_perturbations.extend(perturbations)
 
     # 拼接所有批次
     x0_all = torch.cat(all_x0, dim=0)
@@ -197,6 +211,7 @@ def evaluate_model(
     tissue_idx_all = torch.cat(all_tissue_idx, dim=0)
     cond_vec_all = torch.cat(all_cond_vec, dim=0)
     spectral_norms_all = torch.cat(all_spectral_norms, dim=0)
+    perturbations_all = all_perturbations
 
     print(f"总样本数: {x0_all.shape[0]}")
 
@@ -212,6 +227,9 @@ def evaluate_model(
     # 2. 分布匹配
     print("  - 分布匹配指标")
     all_metrics["distribution"] = distribution_metrics(z1_true_all, z1_pred_all)
+    all_metrics["distribution"]["pca_energy_distance"] = pca_energy_distance(
+        x1_true_all, x1_pred_all, n_components=50
+    )
 
     # 3. 差异基因预测
     if compute_de_metrics:
@@ -226,6 +244,14 @@ def evaluate_model(
         operator_model, tissue_idx_all.to(device), cond_vec_all.to(device), device=device
     )
 
+    print("  - 扰动特异shift指标 (Δ/Δ20)")
+    all_metrics["shift"] = perturbation_shift_metrics(
+        x0_all,
+        x1_true_all,
+        x1_pred_all,
+        perturbations_all
+    )
+
     # 收集预测结果
     predictions = {
         "x0": x0_all.numpy(),
@@ -234,7 +260,8 @@ def evaluate_model(
         "z0": z0_all.numpy(),
         "z1_true": z1_true_all.numpy(),
         "z1_pred": z1_pred_all.numpy(),
-        "spectral_norms": spectral_norms_all.numpy()
+        "spectral_norms": spectral_norms_all.numpy(),
+        "perturbations": np.array(perturbations_all)
     }
 
     return all_metrics, predictions
@@ -355,6 +382,8 @@ def print_metrics_summary(all_metrics):
         dist = all_metrics["distribution"]
         print(f"  E-distance:      {dist['energy_distance']:.4f}")
         print(f"  Mean L2 dist:    {dist['mean_l2_dist']:.4f}")
+        if "pca_energy_distance" in dist:
+            print(f"  PCA E-distance:  {dist['pca_energy_distance']:.4f}")
 
     if "de_genes" in all_metrics:
         print("\n【差异基因预测】")
@@ -371,7 +400,70 @@ def print_metrics_summary(all_metrics):
         print(f"  Spectral norm (max):  {op['spectral_norm_max']:.4f}")
         print(f"  Response sparsity:    {op['response_sparsity']:.4f}")
 
+    if "shift" in all_metrics:
+        print("\n【扰动特异shift】")
+        shift = all_metrics["shift"]
+        print(f"  Pearson Δ (mean):     {shift['pearson_delta_mean']:.4f}")
+        print(f"  Pearson Δ20 (mean):   {shift['pearson_delta20_mean']:.4f}")
+
+    if "baselines" in all_metrics:
+        print("\n【简单基线对照】")
+        for name, metrics in all_metrics["baselines"].items():
+            print(f"  {name}: MSE={metrics['mse']:.4f}, Pearson={metrics['pearson_mean']:.4f}")
+
     print("=" * 80)
+
+
+def _compute_top_genes_by_perturbation(adata, top_k: int = 20) -> dict:
+    if "perturbation" not in adata.obs.columns or "timepoint" not in adata.obs.columns:
+        return {}
+    x0 = adata[adata.obs["timepoint"] == "t0"].X
+    if hasattr(x0, "toarray"):
+        x0 = x0.toarray()
+    control_mean = np.asarray(x0).mean(axis=0)
+    result = {}
+    for pert in adata.obs["perturbation"].unique():
+        pert_mask = (adata.obs["perturbation"] == pert) & (adata.obs["timepoint"] == "t1")
+        if not np.any(pert_mask):
+            continue
+        x1 = adata[pert_mask].X
+        if hasattr(x1, "toarray"):
+            x1 = x1.toarray()
+        delta = np.asarray(x1).mean(axis=0) - control_mean
+        result[pert] = np.argsort(np.abs(delta))[-top_k:]
+    return result
+
+
+def _baseline_metrics(x0, x1_true, perturbations, train_adata=None) -> dict:
+    x0_np = x0.cpu().numpy()
+    x1_true_np = x1_true.cpu().numpy()
+    base = {}
+    base["no_change"] = reconstruction_metrics(x1_true, x0)
+
+    mean_x1 = x1_true_np.mean(axis=0)
+    mean_pred = torch.from_numpy(np.tile(mean_x1, (x1_true_np.shape[0], 1))).to(x1_true.device)
+    base["mean"] = reconstruction_metrics(x1_true, mean_pred)
+
+    if train_adata is not None and "perturbation" in train_adata.obs.columns:
+        perts = train_adata.obs["perturbation"].values
+        x_train = train_adata[train_adata.obs["timepoint"] == "t1"].X
+        if hasattr(x_train, "toarray"):
+            x_train = x_train.toarray()
+        mean_by_pert = {}
+        for pert in np.unique(perts):
+            pert_mask = (train_adata.obs["perturbation"] == pert) & (train_adata.obs["timepoint"] == "t1")
+            if np.any(pert_mask):
+                mean_by_pert[pert] = np.asarray(train_adata[pert_mask].X).mean(axis=0)
+        match_pred = []
+        for pert in perturbations:
+            if pert in mean_by_pert:
+                match_pred.append(mean_by_pert[pert])
+            else:
+                match_pred.append(mean_x1)
+        match_pred = torch.from_numpy(np.asarray(match_pred)).to(x1_true.device)
+        base["matching_mean"] = reconstruction_metrics(x1_true, match_pred)
+
+    return base
 
 
 def main():
@@ -401,6 +493,12 @@ def main():
         type=str,
         required=True,
         help="测试数据路径（h5ad格式）"
+    )
+    parser.add_argument(
+        "--train_data_path",
+        type=str,
+        default=None,
+        help="训练数据路径（用于Δ20与baseline估计）"
     )
     parser.add_argument(
         "--output_dir",
@@ -454,6 +552,12 @@ def main():
     print(f"\n加载测试数据: {args.data_path}")
     adata_test = sc.read_h5ad(args.data_path)
     print(f"测试集: {adata_test.n_obs} 细胞, {adata_test.n_vars} 基因")
+    adata_train = None
+    if args.train_data_path:
+        if not Path(args.train_data_path).exists():
+            print(f"错误: 训练数据不存在: {args.train_data_path}")
+            return
+        adata_train = sc.read_h5ad(args.train_data_path)
 
     # 创建数据集
     test_dataset = SCPerturbPairDataset(adata_test, cond_encoder, tissue2idx)
@@ -473,6 +577,21 @@ def main():
         test_loader,
         args.device,
         compute_de_metrics=not args.no_de_metrics
+    )
+    if adata_train is not None:
+        top_genes_by_pert = _compute_top_genes_by_perturbation(adata_train, top_k=20)
+        all_metrics["shift"] = perturbation_shift_metrics(
+            torch.from_numpy(predictions["x0"]).to(args.device),
+            torch.from_numpy(predictions["x1_true"]).to(args.device),
+            torch.from_numpy(predictions["x1_pred"]).to(args.device),
+            list(predictions["perturbations"]),
+            top_genes_by_perturbation=top_genes_by_pert
+        )
+    all_metrics["baselines"] = _baseline_metrics(
+        torch.from_numpy(predictions["x0"]).to(args.device),
+        torch.from_numpy(predictions["x1_true"]).to(args.device),
+        list(predictions["perturbations"]),
+        train_adata=adata_train
     )
 
     # 保存结果

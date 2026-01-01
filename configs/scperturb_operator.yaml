@@ -13,7 +13,16 @@ training:
   batch_size: 256               # 批次大小（算子训练batch可以小一些）
   n_epochs_operator: 100        # 算子训练轮数
   lambda_e: 1.0                 # E-distance损失权重
+  lambda_delta: 1.0             # Δ损失权重
+  lambda_cons: 0.1              # 组内一致性正则权重
   lambda_stab: 0.001            # 稳定性正则化权重
+  edist_max_exact_batch: 256    # E-distance精确计算阈值
+  lr_embed_finetune: 1e-5       # 解冻VAE时的微调学习率
+  finetune_scope: none          # none | partial | all
+  finetune_start_epoch: -1      # >=0时在该epoch开始解冻
+  spectral_penalty_iters: 2     # 样本级谱范数迭代次数
+  lambda_gate_control: 0.1      # 对照条件门控约束权重
+  control_perturbations: ["control"]  # 对照扰动标签
   gradient_clip: 1.0            # 梯度裁剪阈值
   freeze_vae: true              # 是否冻结VAE参数
 

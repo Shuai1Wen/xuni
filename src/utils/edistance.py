@@ -273,6 +273,29 @@ def energy_distance_batched(
     return ed2
 
 
+def energy_distance_auto(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    max_exact_batch: int = 256,
+    batch_size: Optional[int] = None
+) -> torch.Tensor:
+    """
+    自动选择精确版或分块版E-distance
+
+    参数:
+        x: (n, d) 第一组样本
+        y: (m, d) 第二组样本
+        max_exact_batch: 低于该阈值使用精确版本
+        batch_size: 分块大小，未提供时使用max_exact_batch
+    """
+    n, m = x.size(0), y.size(0)
+    if n <= max_exact_batch and m <= max_exact_batch:
+        return energy_distance(x, y)
+    if batch_size is None:
+        batch_size = max_exact_batch
+    return energy_distance_batched(x, y, batch_size=batch_size)
+
+
 def check_edistance_properties(
     x: torch.Tensor,
     y: torch.Tensor,
