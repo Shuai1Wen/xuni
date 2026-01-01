@@ -28,7 +28,7 @@ import json
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.models.nb_vae import NBVAE
+from src.models.nb_vae import NBVAE, GaussianVAE, gaussian_elbo_loss
 from src.models.operator import OperatorModel
 from src.data.scperturb_dataset import SCPerturbEmbedDataset, SCPerturbPairDataset
 from src.data.scperturb_dataset import collate_fn_embed, collate_fn_pair
@@ -126,12 +126,28 @@ def train_vae_phase(args):
 
     # 创建模型
     print("\n创建VAE模型...")
-    model = NBVAE(
-        n_genes=config["model"]["n_genes"],
-        latent_dim=config["model"]["latent_dim"],
-        n_tissues=len(tissue2idx),
-        hidden_dim=config["model"]["hidden_dim"]
-    )
+    likelihood = config["model"].get("likelihood", "nb")
+    input_rep = config["data"].get("input_representation", "counts")
+    if input_rep == "counts" and likelihood != "nb":
+        raise ValueError("counts输入必须使用NB似然，请将model.likelihood设置为nb。")
+    if input_rep != "counts" and likelihood == "nb":
+        raise ValueError("非counts输入请使用gaussian似然，避免统计假设不一致。")
+    if likelihood == "gaussian":
+        model = GaussianVAE(
+            n_genes=config["model"]["n_genes"],
+            latent_dim=config["model"]["latent_dim"],
+            n_tissues=len(tissue2idx),
+            hidden_dim=config["model"]["hidden_dim"]
+        )
+        loss_fn = gaussian_elbo_loss
+    else:
+        model = NBVAE(
+            n_genes=config["model"]["n_genes"],
+            latent_dim=config["model"]["latent_dim"],
+            n_tissues=len(tissue2idx),
+            hidden_dim=config["model"]["hidden_dim"]
+        )
+        loss_fn = None
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
 
     # 训练配置
@@ -152,7 +168,8 @@ def train_vae_phase(args):
         config=train_config,
         val_loader=val_loader,
         checkpoint_dir=str(checkpoint_dir),
-        device=config["experiment"]["device"]
+        device=config["experiment"]["device"],
+        loss_fn=loss_fn if loss_fn is not None else None
     )
 
     # 保存训练历史
@@ -256,12 +273,21 @@ def train_operator_phase(args):
     vae_checkpoint_path = args.vae_checkpoint if args.vae_checkpoint else config["experiment"]["vae_checkpoint"]
     vae_checkpoint = torch.load(vae_checkpoint_path, map_location="cpu")
 
-    embed_model = NBVAE(
-        n_genes=vae_checkpoint["model_config"]["n_genes"],
-        latent_dim=vae_checkpoint["model_config"]["latent_dim"],
-        n_tissues=vae_checkpoint["model_config"]["n_tissues"],
-        hidden_dim=vae_checkpoint["model_config"]["hidden_dim"]
-    )
+    likelihood = vae_checkpoint["model_config"].get("likelihood", "nb")
+    if likelihood == "gaussian":
+        embed_model = GaussianVAE(
+            n_genes=vae_checkpoint["model_config"]["n_genes"],
+            latent_dim=vae_checkpoint["model_config"]["latent_dim"],
+            n_tissues=vae_checkpoint["model_config"]["n_tissues"],
+            hidden_dim=vae_checkpoint["model_config"]["hidden_dim"]
+        )
+    else:
+        embed_model = NBVAE(
+            n_genes=vae_checkpoint["model_config"]["n_genes"],
+            latent_dim=vae_checkpoint["model_config"]["latent_dim"],
+            n_tissues=vae_checkpoint["model_config"]["n_tissues"],
+            hidden_dim=vae_checkpoint["model_config"]["hidden_dim"]
+        )
     embed_model.load_state_dict(vae_checkpoint["model_state_dict"])
     print(f"VAE加载成功: {vae_checkpoint_path}")
 
@@ -284,6 +310,15 @@ def train_operator_phase(args):
         n_epochs_operator=config["training"]["n_epochs_operator"],
         lambda_e=config["training"]["lambda_e"],
         lambda_stab=config["training"]["lambda_stab"],
+        lambda_delta=config["training"].get("lambda_delta", 1.0),
+        lambda_cons=config["training"].get("lambda_cons", 0.1),
+        edist_max_exact_batch=config["training"].get("edist_max_exact_batch", 256),
+        lr_embed_finetune=config["training"].get("lr_embed_finetune", 1e-5),
+        finetune_scope=config["training"].get("finetune_scope", "none"),
+        finetune_start_epoch=config["training"].get("finetune_start_epoch", -1),
+        spectral_penalty_iters=config["training"].get("spectral_penalty_iters", 2),
+        lambda_gate_control=config["training"].get("lambda_gate_control", 0.1),
+        control_perturbations=config["training"].get("control_perturbations", ["control"]),
         gradient_clip=config["training"]["gradient_clip"]
     )
 

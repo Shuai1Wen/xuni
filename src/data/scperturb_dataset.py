@@ -84,7 +84,11 @@ class SCPerturbEmbedDataset(Dataset):
 
         # 获取组织信息
         tissue = self.adata.obs.iloc[idx]["tissue"]
-        t_idx = self.tissue2idx.get(tissue, 0)  # 默认0
+        if tissue not in self.tissue2idx:
+            raise ValueError(
+                f"未知组织类型: {tissue}. 可用组织类型: {list(self.tissue2idx.keys())}"
+            )
+        t_idx = self.tissue2idx[tissue]
 
         # 构造one-hot编码
         t_onehot = torch.zeros(self.n_tissues, dtype=torch.float32)
@@ -150,6 +154,7 @@ class SCPerturbPairDataset(Dataset):
         self.n_tissues = len(tissue2idx)
         self.max_pairs_per_condition = max_pairs_per_condition
         self.seed = seed  # 保存seed用于可重复性
+        self._condition_to_id: Dict[Tuple, int] = {}
 
         # 构建配对
         self.pairs = self._build_pairs()
@@ -184,6 +189,7 @@ class SCPerturbPairDataset(Dataset):
 
         grouped = obs_df.groupby(group_keys)
 
+        rng = np.random.default_rng(self.seed)
         for condition, group in grouped:
             # 分离t0和t1
             t0_indices = group[group["timepoint"] == "t0"].index.tolist()
@@ -201,17 +207,20 @@ class SCPerturbPairDataset(Dataset):
             )
 
             # 随机采样
-            rng = np.random.RandomState(self.seed)  # 使用可控的随机种子
             t0_sampled = rng.choice(t0_indices, size=n_pairs, replace=True)
             t1_sampled = rng.choice(t1_indices, size=n_pairs, replace=True)
 
             # 构造obs_dict（使用t0的元信息，但标记为配对）
+            condition_id = self._condition_to_id.setdefault(
+                condition, len(self._condition_to_id)
+            )
             for i0, i1 in zip(t0_sampled, t1_sampled):
                 obs_dict = obs_df.iloc[self.adata.obs.index.get_loc(i0)].to_dict()
                 pairs.append((
                     self.adata.obs.index.get_loc(i0),  # AnnData内部索引
                     self.adata.obs.index.get_loc(i1),
-                    obs_dict
+                    obs_dict,
+                    condition_id
                 ))
 
         return pairs
@@ -235,7 +244,7 @@ class SCPerturbPairDataset(Dataset):
                 - tissue_idx: 标量，组织索引
                 - cond_vec: (cond_dim,) 条件向量θ
         """
-        idx0, idx1, obs_dict = self.pairs[idx]
+        idx0, idx1, obs_dict, condition_id = self.pairs[idx]
 
         # 获取表达向量
         x0 = self.adata.X[idx0]
@@ -251,7 +260,11 @@ class SCPerturbPairDataset(Dataset):
 
         # 获取组织信息
         tissue = obs_dict["tissue"]
-        t_idx = self.tissue2idx.get(tissue, 0)
+        if tissue not in self.tissue2idx:
+            raise ValueError(
+                f"未知组织类型: {tissue}. 可用组织类型: {list(self.tissue2idx.keys())}"
+            )
+        t_idx = self.tissue2idx[tissue]
 
         # 构造one-hot编码
         t_onehot = torch.zeros(self.n_tissues, dtype=torch.float32)
@@ -265,7 +278,9 @@ class SCPerturbPairDataset(Dataset):
             "x1": x1,                                          # (G,)
             "tissue_onehot": t_onehot,                        # (n_tissues,)
             "tissue_idx": torch.tensor(t_idx, dtype=torch.long),  # 标量
-            "cond_vec": cond_vec                              # (cond_dim,)
+            "cond_vec": cond_vec,                             # (cond_dim,)
+            "condition_id": torch.tensor(condition_id, dtype=torch.long),
+            "perturbation": obs_dict["perturbation"]
         }
 
 
@@ -309,5 +324,7 @@ def collate_fn_pair(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "x1": torch.stack([item["x1"] for item in batch]),  # (B, G)
         "tissue_onehot": torch.stack([item["tissue_onehot"] for item in batch]),  # (B, n_tissues)
         "tissue_idx": torch.stack([item["tissue_idx"] for item in batch]),  # (B,)
-        "cond_vec": torch.stack([item["cond_vec"] for item in batch])  # (B, cond_dim)
+        "cond_vec": torch.stack([item["cond_vec"] for item in batch]),  # (B, cond_dim)
+        "condition_id": torch.stack([item["condition_id"] for item in batch]),  # (B,)
+        "perturbation": [item["perturbation"] for item in batch]
     }

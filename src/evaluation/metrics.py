@@ -147,6 +147,85 @@ def distribution_metrics(
     return metrics
 
 
+def pca_energy_distance(
+    x_true: torch.Tensor,
+    x_pred: torch.Tensor,
+    n_components: int = 50
+) -> float:
+    """
+    在PCA空间计算E-distance
+
+    参数:
+        x_true: (n, G) 真实表达
+        x_pred: (m, G) 预测表达
+        n_components: PCA维度
+    """
+    from sklearn.decomposition import PCA
+
+    x_true_np = x_true.cpu().numpy()
+    x_pred_np = x_pred.cpu().numpy()
+    x_combined = np.vstack([x_true_np, x_pred_np])
+    pca = PCA(n_components=min(n_components, x_combined.shape[1]))
+    z_combined = pca.fit_transform(x_combined)
+    z_true = torch.from_numpy(z_combined[: x_true_np.shape[0]]).to(x_true.device)
+    z_pred = torch.from_numpy(z_combined[x_true_np.shape[0]:]).to(x_true.device)
+    ed2 = energy_distance(z_pred, z_true)
+    return float(ed2)
+
+
+def perturbation_shift_metrics(
+    x0: torch.Tensor,
+    x1_true: torch.Tensor,
+    x1_pred: torch.Tensor,
+    perturbations: list,
+    top_genes_by_perturbation: Optional[Dict[str, np.ndarray]] = None,
+    top_k: int = 20,
+    eps: float = 1e-8
+) -> Dict[str, float]:
+    """
+    计算Systema风格的扰动特异shift指标（Δ与Δ20）
+    """
+    x0_np = x0.cpu().numpy()
+    x1_true_np = x1_true.cpu().numpy()
+    x1_pred_np = x1_pred.cpu().numpy()
+    control_mean = x0_np.mean(axis=0)
+
+    perts = np.array(perturbations)
+    unique_perts = np.unique(perts)
+    corr_all = []
+    corr_top = []
+    per_perturbation = {}
+
+    for pert in unique_perts:
+        mask = perts == pert
+        if mask.sum() == 0:
+            continue
+        mean_true = x1_true_np[mask].mean(axis=0)
+        mean_pred = x1_pred_np[mask].mean(axis=0)
+        delta_true = mean_true - control_mean
+        delta_pred = mean_pred - control_mean
+        if delta_true.std() < eps or delta_pred.std() < eps:
+            continue
+        corr, _ = pearsonr(delta_true, delta_pred)
+        corr_all.append(corr)
+
+        if top_genes_by_perturbation and pert in top_genes_by_perturbation:
+            top_idx = top_genes_by_perturbation[pert]
+        else:
+            top_idx = np.argsort(np.abs(delta_true))[-top_k:]
+        corr20, _ = pearsonr(delta_true[top_idx], delta_pred[top_idx])
+        corr_top.append(corr20)
+        per_perturbation[pert] = {
+            "pearson_delta": float(corr),
+            "pearson_delta20": float(corr20)
+        }
+
+    return {
+        "pearson_delta_mean": float(np.mean(corr_all)) if corr_all else 0.0,
+        "pearson_delta20_mean": float(np.mean(corr_top)) if corr_top else 0.0,
+        "per_perturbation": per_perturbation
+    }
+
 def de_gene_prediction_metrics(
     x0: torch.Tensor,
     x1_true: torch.Tensor,

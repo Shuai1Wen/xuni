@@ -27,11 +27,14 @@ def train_embedding(
     config: TrainingConfig,
     val_loader: Optional[DataLoader] = None,
     checkpoint_dir: Optional[str] = None,
-    device: str = "cuda"
+    device: str = "cuda",
+    loss_fn=elbo_loss
 ) -> Dict[str, list]:
     """训练NB-VAE潜空间嵌入模型"""
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr_embed)
+    if loss_fn is None:
+        loss_fn = elbo_loss
     
     warmup_epochs = config.warmup_epochs
     beta_kl = config.beta_kl
@@ -58,7 +61,7 @@ def train_embedding(
             x = batch["x"].to(device)
             tissue_onehot = batch["tissue_onehot"].to(device)
             
-            loss, loss_dict = elbo_loss(x, tissue_onehot, model, beta=beta)
+            loss, loss_dict = loss_fn(x, tissue_onehot, model, beta=beta)
 
             # 检测NaN/Inf：在backward前检查，便于诊断
             if torch.isnan(loss) or torch.isinf(loss):
@@ -100,7 +103,7 @@ def train_embedding(
         
         # 验证
         if val_loader is not None:
-            val_metrics = validate_embedding(model, val_loader, device, beta)
+            val_metrics = validate_embedding(model, val_loader, device, beta, loss_fn)
             history["val_loss"].append(val_metrics["loss"])
             history["val_recon"].append(val_metrics["recon_loss"])
             history["val_kl"].append(val_metrics["kl_loss"])
@@ -127,7 +130,13 @@ def train_embedding(
 
 
 @torch.no_grad()
-def validate_embedding(model: NBVAE, val_loader: DataLoader, device: str, beta: float = 1.0):
+def validate_embedding(
+    model: NBVAE,
+    val_loader: DataLoader,
+    device: str,
+    beta: float = 1.0,
+    loss_fn=elbo_loss
+):
     """在验证集上评估模型"""
     model.eval()
     total_loss = total_recon = total_kl = n_samples = 0.0
@@ -136,7 +145,7 @@ def validate_embedding(model: NBVAE, val_loader: DataLoader, device: str, beta: 
         x = batch["x"].to(device)
         tissue_onehot = batch["tissue_onehot"].to(device)
         
-        loss, loss_dict = elbo_loss(x, tissue_onehot, model, beta=beta)
+        loss, loss_dict = loss_fn(x, tissue_onehot, model, beta=beta)
         
         batch_size = x.size(0)
         total_loss += loss.item() * batch_size
@@ -163,6 +172,7 @@ def save_checkpoint(model, optimizer, epoch, history, path):
             "latent_dim": model.latent_dim,
             "n_tissues": model.n_tissues,
             "hidden_dim": model.hidden_dim,
+            "likelihood": getattr(model, "likelihood", "nb"),
         },
     }
     torch.save(checkpoint, path)
