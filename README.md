@@ -23,6 +23,37 @@
 
 ## 最近更新
 
+### ✅ 严格实现与评测闭环 (2025-11-24)
+
+**严格实现补全**：
+1. ✅ **Systema split + 组合扰动分层** - 预处理脚本新增 `split_data_systema`，支持 `--split_strategy systema`
+2. ✅ **Δ20 防泄漏** - Δ20 仅基于训练集top genes，未提供训练集时自动跳过
+3. ✅ **评测基线扩展** - 新增加性扰动基线与线性回归基线
+4. ✅ **VAE 去噪训练** - 增加 gene masking 参数，支持 denoising VAE
+5. ✅ **scPerturb评测细节** - 支持 HVG筛选 / 条件下采样 / Combat批次校正
+6. ✅ **control标签标准化** - 统一对照别名，确保门控正则生效
+
+**配置新增**：
+- `TrainingConfig.denoise_mask_prob`
+- `TrainingConfig.denoise_mask_value`
+
+---
+
+### ✅ Systema评测完善 (2025-11-25)
+
+**评测增强**：
+1. ✅ **Systema协议模式** - 评测脚本新增 `--systema_protocol` 固定流程与输出报告
+2. ✅ **Δ20分层统计** - 支持按 tissue / cell_type / 二者组合统计 top genes
+3. ✅ **基线扩展** - 新增 `ridge/elasticnet/condition_mean` 对照基线
+4. ✅ **组合扰动严格模式** - 预处理支持 `--combo_unseen_mode strict`，确保组合单元在训练集中出现
+
+---
+
+### 📌 仍存简化点说明
+
+- 评测基线尚未完全覆盖更复杂/因果类基线（P2）。
+- Systema官方基准全流程仍需进一步对齐（P2）。
+
 ### 🎯 深度优化 (2025-11-20)
 
 **Critical修复**（阻塞性问题）：

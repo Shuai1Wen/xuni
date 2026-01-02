@@ -24,6 +24,7 @@ import json
 import numpy as np
 import sys
 from torch.utils.data import DataLoader
+from sklearn.linear_model import LinearRegression, Ridge, ElasticNet
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent.parent
@@ -33,6 +34,7 @@ from src.models.nb_vae import NBVAE, GaussianVAE
 from src.models.operator import OperatorModel
 from src.utils.cond_encoder import ConditionEncoder
 from src.data.scperturb_dataset import SCPerturbPairDataset, collate_fn_pair
+from src.utils.perturbation import normalize_perturbation_label
 from src.evaluation.metrics import (
     reconstruction_metrics,
     distribution_metrics,
@@ -130,7 +132,9 @@ def evaluate_model(
     operator_model,
     dataloader,
     device: str,
-    compute_de_metrics: bool = True
+    compute_de_metrics: bool = True,
+    top_genes_by_perturbation: dict = None,
+    shift_groupby: str = "none"
 ):
     """
     评估模型性能
@@ -158,6 +162,8 @@ def evaluate_model(
     all_cond_vec = []
     all_spectral_norms = []
     all_perturbations = []
+    all_tissues = []
+    all_cell_types = []
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -169,6 +175,8 @@ def evaluate_model(
             tissue_idx = batch["tissue_idx"].to(device)
             cond_vec = batch["cond_vec"].to(device)
             perturbations = batch["perturbation"]
+            tissues = batch["tissue"]
+            cell_types = batch["cell_type"]
 
             # 转换tissue_idx为one-hot编码
             tissue_onehot = F.one_hot(tissue_idx, num_classes=vae_model.n_tissues).float()
@@ -200,6 +208,8 @@ def evaluate_model(
             all_cond_vec.append(cond_vec.cpu())
             all_spectral_norms.append(norms.cpu())
             all_perturbations.extend(perturbations)
+            all_tissues.extend(tissues)
+            all_cell_types.extend(cell_types)
 
     # 拼接所有批次
     x0_all = torch.cat(all_x0, dim=0)
@@ -211,7 +221,21 @@ def evaluate_model(
     tissue_idx_all = torch.cat(all_tissue_idx, dim=0)
     cond_vec_all = torch.cat(all_cond_vec, dim=0)
     spectral_norms_all = torch.cat(all_spectral_norms, dim=0)
-    perturbations_all = all_perturbations
+    perturbations_all = [normalize_perturbation_label(p) for p in all_perturbations]
+    shift_keys = list(perturbations_all)
+    if shift_groupby == "tissue":
+        shift_keys = [
+            f"{tissue}::{pert}" for tissue, pert in zip(all_tissues, perturbations_all)
+        ]
+    elif shift_groupby == "cell_type":
+        shift_keys = [
+            f"{cell_type}::{pert}" for cell_type, pert in zip(all_cell_types, perturbations_all)
+        ]
+    elif shift_groupby == "both":
+        shift_keys = [
+            f"{tissue}||{cell_type}::{pert}"
+            for tissue, cell_type, pert in zip(all_tissues, all_cell_types, perturbations_all)
+        ]
 
     print(f"总样本数: {x0_all.shape[0]}")
 
@@ -244,13 +268,15 @@ def evaluate_model(
         operator_model, tissue_idx_all.to(device), cond_vec_all.to(device), device=device
     )
 
-    print("  - 扰动特异shift指标 (Δ/Δ20)")
-    all_metrics["shift"] = perturbation_shift_metrics(
-        x0_all,
-        x1_true_all,
-        x1_pred_all,
-        perturbations_all
-    )
+    if top_genes_by_perturbation is not None:
+        print("  - 扰动特异shift指标 (Δ/Δ20)")
+        all_metrics["shift"] = perturbation_shift_metrics(
+            x0_all,
+            x1_true_all,
+            x1_pred_all,
+            shift_keys,
+            top_genes_by_perturbation=top_genes_by_perturbation
+        )
 
     # 收集预测结果
     predictions = {
@@ -261,7 +287,9 @@ def evaluate_model(
         "z1_true": z1_true_all.numpy(),
         "z1_pred": z1_pred_all.numpy(),
         "spectral_norms": spectral_norms_all.numpy(),
-        "perturbations": np.array(perturbations_all)
+        "perturbations": np.array(perturbations_all),
+        "tissues": np.array(all_tissues),
+        "cell_types": np.array(all_cell_types)
     }
 
     return all_metrics, predictions
@@ -283,6 +311,12 @@ def save_results(all_metrics, predictions, output_dir: Path):
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(all_metrics, f, indent=2, ensure_ascii=False)
     print(f"\n指标已保存至: {metrics_path}")
+
+    if all_metrics.get("systema_report"):
+        report_path = output_dir / "systema_report.json"
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(all_metrics["systema_report"], f, indent=2, ensure_ascii=False)
+        print(f"Systema报告已保存至: {report_path}")
 
     # 保存预测结果
     predictions_dir = output_dir / "predictions"
@@ -369,7 +403,6 @@ def print_metrics_summary(all_metrics):
     print("\n" + "=" * 80)
     print("评估结果摘要")
     print("=" * 80)
-
     if "reconstruction" in all_metrics:
         print("\n【重建质量】")
         recon = all_metrics["reconstruction"]
@@ -414,27 +447,109 @@ def print_metrics_summary(all_metrics):
     print("=" * 80)
 
 
-def _compute_top_genes_by_perturbation(adata, top_k: int = 20) -> dict:
+def _apply_hvg(adata, n_top_genes: int):
+    if n_top_genes is None:
+        return adata
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor="seurat_v3")
+    return adata[:, adata.var["highly_variable"]].copy()
+
+
+def _apply_systema_protocol(args):
+    """应用Systema评测固定流程参数"""
+    args.hvg_top_genes = args.hvg_top_genes or 2000
+    args.subsample_per_condition = args.subsample_per_condition or 500
+    args.batch_correction = True
+    args.delta20_min_cells = args.delta20_min_cells or 30
+    args.delta20_groupby = args.delta20_groupby or "both"
+    return args
+
+
+def _subsample_per_condition(adata, max_cells: int, seed: int = 42):
+    if max_cells is None or max_cells <= 0:
+        return adata
+    rng = np.random.default_rng(seed)
+    obs = adata.obs.copy()
+    obs["perturbation_norm"] = obs["perturbation"].map(normalize_perturbation_label)
+    condition_key = (
+        obs["perturbation_norm"].astype(str) + "||" +
+        obs["tissue"].astype(str) + "||" +
+        obs.get("cell_type", "unknown").astype(str) + "||" +
+        obs["timepoint"].astype(str)
+    )
+    obs["condition_key"] = condition_key
+    keep_indices = []
+    for _, group in obs.groupby("condition_key"):
+        indices = group.index.to_numpy()
+        if len(indices) > max_cells:
+            indices = rng.choice(indices, size=max_cells, replace=False)
+        keep_indices.extend(indices.tolist())
+    return adata[keep_indices].copy()
+
+
+def _compute_top_genes_by_perturbation(
+    adata,
+    top_k: int = 20,
+    groupby: str = "none",
+    min_cells: int = 20
+) -> dict:
     if "perturbation" not in adata.obs.columns or "timepoint" not in adata.obs.columns:
         return {}
+    perturbation_norm = adata.obs["perturbation"].map(normalize_perturbation_label)
     x0 = adata[adata.obs["timepoint"] == "t0"].X
     if hasattr(x0, "toarray"):
         x0 = x0.toarray()
     control_mean = np.asarray(x0).mean(axis=0)
     result = {}
-    for pert in adata.obs["perturbation"].unique():
-        pert_mask = (adata.obs["perturbation"] == pert) & (adata.obs["timepoint"] == "t1")
-        if not np.any(pert_mask):
-            continue
-        x1 = adata[pert_mask].X
-        if hasattr(x1, "toarray"):
-            x1 = x1.toarray()
-        delta = np.asarray(x1).mean(axis=0) - control_mean
-        result[pert] = np.argsort(np.abs(delta))[-top_k:]
+    if groupby == "none":
+        group_keys = None
+    elif groupby == "tissue":
+        group_keys = ["tissue"] if "tissue" in adata.obs.columns else None
+    elif groupby == "cell_type":
+        group_keys = ["cell_type"] if "cell_type" in adata.obs.columns else None
+    else:
+        if "tissue" in adata.obs.columns and "cell_type" in adata.obs.columns:
+            group_keys = ["tissue", "cell_type"]
+        else:
+            group_keys = None
+
+    obs = adata.obs.copy()
+    obs["perturbation_norm"] = perturbation_norm.values
+    if group_keys:
+        obs["group_key"] = obs[group_keys].astype(str).agg("||".join, axis=1)
+    else:
+        obs["group_key"] = "global"
+
+    for group_key, group in obs.groupby("group_key"):
+        for pert in group["perturbation_norm"].unique():
+            pert_mask = (
+                (obs["perturbation_norm"] == pert)
+                & (obs["timepoint"] == "t1")
+                & (obs["group_key"] == group_key)
+            )
+            if pert_mask.sum() < min_cells:
+                continue
+            x1 = adata[pert_mask].X
+            if hasattr(x1, "toarray"):
+                x1 = x1.toarray()
+            delta = np.asarray(x1).mean(axis=0) - control_mean
+            if groupby == "none":
+                key = pert
+            else:
+                key = f"{group_key}::{pert}"
+            result[key] = np.argsort(np.abs(delta))[-top_k:]
     return result
 
 
-def _baseline_metrics(x0, x1_true, perturbations, train_adata=None) -> dict:
+def _baseline_metrics(
+    x0,
+    x1_true,
+    perturbations,
+    tissues,
+    cell_types,
+    train_adata=None,
+    train_pairs=None,
+    max_linear_samples: int = 5000
+) -> dict:
     x0_np = x0.cpu().numpy()
     x1_true_np = x1_true.cpu().numpy()
     base = {}
@@ -445,13 +560,15 @@ def _baseline_metrics(x0, x1_true, perturbations, train_adata=None) -> dict:
     base["mean"] = reconstruction_metrics(x1_true, mean_pred)
 
     if train_adata is not None and "perturbation" in train_adata.obs.columns:
-        perts = train_adata.obs["perturbation"].values
+        perts = train_adata.obs["perturbation"].map(normalize_perturbation_label).values
         x_train = train_adata[train_adata.obs["timepoint"] == "t1"].X
         if hasattr(x_train, "toarray"):
             x_train = x_train.toarray()
         mean_by_pert = {}
         for pert in np.unique(perts):
-            pert_mask = (train_adata.obs["perturbation"] == pert) & (train_adata.obs["timepoint"] == "t1")
+            pert_mask = (train_adata.obs["perturbation"].map(normalize_perturbation_label) == pert) & (
+                train_adata.obs["timepoint"] == "t1"
+            )
             if np.any(pert_mask):
                 mean_by_pert[pert] = np.asarray(train_adata[pert_mask].X).mean(axis=0)
         match_pred = []
@@ -463,7 +580,89 @@ def _baseline_metrics(x0, x1_true, perturbations, train_adata=None) -> dict:
         match_pred = torch.from_numpy(np.asarray(match_pred)).to(x1_true.device)
         base["matching_mean"] = reconstruction_metrics(x1_true, match_pred)
 
+        x0_train = train_adata[train_adata.obs["timepoint"] == "t0"].X
+        if hasattr(x0_train, "toarray"):
+            x0_train = x0_train.toarray()
+        control_mean = np.asarray(x0_train).mean(axis=0)
+        delta_by_pert = {}
+        for pert in np.unique(perts):
+            pert_mask = (train_adata.obs["perturbation"].map(normalize_perturbation_label) == pert) & (
+                train_adata.obs["timepoint"] == "t1"
+            )
+            if np.any(pert_mask):
+                mean_x1_pert = np.asarray(train_adata[pert_mask].X).mean(axis=0)
+                delta_by_pert[pert] = mean_x1_pert - control_mean
+        delta_pred = []
+        for pert in perturbations:
+            if pert in delta_by_pert:
+                delta_pred.append(x0_np[0] * 0 + delta_by_pert[pert])
+            else:
+                delta_pred.append(np.zeros_like(mean_x1))
+        delta_pred = np.asarray(delta_pred)
+        additive_pred = torch.from_numpy(x0_np + delta_pred).to(x1_true.device)
+        base["additive_delta"] = reconstruction_metrics(x1_true, additive_pred)
+
+        obs = train_adata.obs.copy()
+        obs["perturbation_norm"] = obs["perturbation"].map(normalize_perturbation_label)
+        obs["condition_key"] = (
+            obs["perturbation_norm"].astype(str) + "||" +
+            obs["tissue"].astype(str) + "||" +
+            obs.get("cell_type", "unknown").astype(str)
+        )
+        mean_by_condition = {}
+        for key, group in obs[obs["timepoint"] == "t1"].groupby("condition_key"):
+            mean_by_condition[key] = np.asarray(train_adata[group.index].X).mean(axis=0)
+        cond_pred = []
+        for pert, tissue, cell_type in zip(perturbations, tissues, cell_types):
+            cond_key = f"{pert}||{tissue}||{cell_type}"
+            cond_pred.append(mean_by_condition.get(cond_key, mean_x1))
+        cond_pred = torch.from_numpy(np.asarray(cond_pred)).to(x1_true.device)
+        base["condition_mean"] = reconstruction_metrics(x1_true, cond_pred)
+
+    if train_pairs is not None and len(train_pairs) > 0:
+        x0_train, x1_train = train_pairs
+        if max_linear_samples is not None and x0_train.shape[0] > max_linear_samples:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(x0_train.shape[0], size=max_linear_samples, replace=False)
+            x0_train = x0_train[idx]
+            x1_train = x1_train[idx]
+        linear = LinearRegression()
+        linear.fit(x0_train, x1_train)
+        linear_pred = linear.predict(x0_np)
+        linear_pred = torch.from_numpy(linear_pred).to(x1_true.device)
+        base["linear_regression"] = reconstruction_metrics(x1_true, linear_pred)
+
+        ridge = Ridge(alpha=1.0)
+        ridge.fit(x0_train, x1_train)
+        ridge_pred = ridge.predict(x0_np)
+        ridge_pred = torch.from_numpy(ridge_pred).to(x1_true.device)
+        base["ridge_regression"] = reconstruction_metrics(x1_true, ridge_pred)
+
+        enet = ElasticNet(alpha=1e-3, l1_ratio=0.5, max_iter=1000)
+        enet.fit(x0_train, x1_train)
+        enet_pred = enet.predict(x0_np)
+        enet_pred = torch.from_numpy(enet_pred).to(x1_true.device)
+        base["elasticnet_regression"] = reconstruction_metrics(x1_true, enet_pred)
+
     return base
+
+
+def _collect_train_pairs(train_adata, cond_encoder, tissue2idx, max_samples: int = 5000, seed: int = 42):
+    if train_adata is None:
+        return None
+    pair_dataset = SCPerturbPairDataset(train_adata, cond_encoder, tissue2idx, seed=seed)
+    n_samples = min(len(pair_dataset), max_samples) if max_samples else len(pair_dataset)
+    if n_samples == 0:
+        return None
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(pair_dataset), size=n_samples, replace=False)
+    x0_list = []
+    x1_list = []
+    for idx in indices:
+        sample = pair_dataset[idx]
+        x0_list.append(sample["x0"].numpy())
+        x1_list.append(sample["x1"].numpy())
+    return np.asarray(x0_list), np.asarray(x1_list)
 
 
 def main():
@@ -523,8 +722,58 @@ def main():
         action="store_true",
         help="不计算差异基因指标（加快评估速度）"
     )
+    parser.add_argument(
+        "--systema_protocol",
+        action="store_true",
+        help="使用Systema官方风格的固定评测流程配置"
+    )
+    parser.add_argument(
+        "--hvg_top_genes",
+        type=int,
+        default=None,
+        help="评估时重新选择HVG数量（默认不重新选择）"
+    )
+    parser.add_argument(
+        "--subsample_per_condition",
+        type=int,
+        default=None,
+        help="每个条件最多保留的细胞数（默认不下采样）"
+    )
+    parser.add_argument(
+        "--batch_correction",
+        action="store_true",
+        help="是否在评估前进行Combat批次校正"
+    )
+    parser.add_argument(
+        "--batch_key",
+        type=str,
+        default="batch",
+        help="批次字段名（默认batch）"
+    )
+    parser.add_argument(
+        "--linear_baseline_max_samples",
+        type=int,
+        default=5000,
+        help="线性基线拟合的最大样本数（默认5000）"
+    )
+    parser.add_argument(
+        "--delta20_groupby",
+        type=str,
+        choices=["none", "tissue", "cell_type", "both"],
+        default="none",
+        help="Δ20基因统计分组粒度（默认none）"
+    )
+    parser.add_argument(
+        "--delta20_min_cells",
+        type=int,
+        default=20,
+        help="Δ20统计最小细胞数阈值（默认20）"
+    )
 
     args = parser.parse_args()
+
+    if args.systema_protocol:
+        args = _apply_systema_protocol(args)
 
     # 检查文件是否存在
     for path in [args.vae_checkpoint, args.operator_checkpoint, args.data_path]:
@@ -559,6 +808,23 @@ def main():
             return
         adata_train = sc.read_h5ad(args.train_data_path)
 
+    if args.batch_correction and args.batch_key in adata_test.obs.columns:
+        sc.pp.combat(adata_test, key=args.batch_key)
+        if adata_train is not None and args.batch_key in adata_train.obs.columns:
+            sc.pp.combat(adata_train, key=args.batch_key)
+
+    if args.subsample_per_condition:
+        adata_test = _subsample_per_condition(adata_test, args.subsample_per_condition, seed=42)
+        if adata_train is not None:
+            adata_train = _subsample_per_condition(adata_train, args.subsample_per_condition, seed=42)
+
+    if args.hvg_top_genes:
+        if adata_train is not None:
+            adata_train = _apply_hvg(adata_train, args.hvg_top_genes)
+            adata_test = adata_test[:, adata_train.var_names].copy()
+        else:
+            adata_test = _apply_hvg(adata_test, args.hvg_top_genes)
+
     # 创建数据集
     test_dataset = SCPerturbPairDataset(adata_test, cond_encoder, tissue2idx)
     test_loader = DataLoader(
@@ -570,29 +836,60 @@ def main():
     )
     print(f"测试配对数: {len(test_dataset)}")
 
+    top_genes_by_pert = None
+    if adata_train is not None:
+        top_genes_by_pert = _compute_top_genes_by_perturbation(
+            adata_train,
+            top_k=20,
+            groupby=args.delta20_groupby,
+            min_cells=args.delta20_min_cells
+        )
+    else:
+        print("\n警告: 未提供训练数据，Δ20将被跳过以避免信息泄漏。")
+
     # 评估模型
     all_metrics, predictions = evaluate_model(
         vae_model,
         operator_model,
         test_loader,
         args.device,
-        compute_de_metrics=not args.no_de_metrics
+        compute_de_metrics=not args.no_de_metrics,
+        top_genes_by_perturbation=top_genes_by_pert,
+        shift_groupby=args.delta20_groupby
     )
+
+    perturbations_norm = [normalize_perturbation_label(p) for p in predictions["perturbations"]]
+    tissues = list(predictions["tissues"])
+    cell_types = list(predictions["cell_types"])
+    train_pairs = None
     if adata_train is not None:
-        top_genes_by_pert = _compute_top_genes_by_perturbation(adata_train, top_k=20)
-        all_metrics["shift"] = perturbation_shift_metrics(
-            torch.from_numpy(predictions["x0"]).to(args.device),
-            torch.from_numpy(predictions["x1_true"]).to(args.device),
-            torch.from_numpy(predictions["x1_pred"]).to(args.device),
-            list(predictions["perturbations"]),
-            top_genes_by_perturbation=top_genes_by_pert
+        train_pairs = _collect_train_pairs(
+            adata_train,
+            cond_encoder,
+            tissue2idx,
+            max_samples=args.linear_baseline_max_samples,
+            seed=42
         )
     all_metrics["baselines"] = _baseline_metrics(
         torch.from_numpy(predictions["x0"]).to(args.device),
         torch.from_numpy(predictions["x1_true"]).to(args.device),
-        list(predictions["perturbations"]),
-        train_adata=adata_train
+        perturbations_norm,
+        tissues,
+        cell_types,
+        train_adata=adata_train,
+        train_pairs=train_pairs,
+        max_linear_samples=args.linear_baseline_max_samples
     )
+
+    if args.systema_protocol:
+        all_metrics["systema_report"] = {
+            "reconstruction_pearson": all_metrics["reconstruction"]["pearson_mean"],
+            "energy_distance": all_metrics["distribution"]["energy_distance"],
+            "pca_energy_distance": all_metrics["distribution"].get("pca_energy_distance"),
+            "shift_delta": all_metrics.get("shift", {}).get("pearson_delta_mean"),
+            "shift_delta20": all_metrics.get("shift", {}).get("pearson_delta20_mean"),
+            "baseline_keys": list(all_metrics["baselines"].keys())
+        }
 
     # 保存结果
     output_dir = Path(args.output_dir)

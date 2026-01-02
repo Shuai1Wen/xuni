@@ -100,6 +100,8 @@ class TrainingConfig:
         gradient_clip: 梯度裁剪阈值，用于防止梯度爆炸
         beta_kl: KL散度权重系数，用于β-VAE变体
         warmup_epochs: 学习率预热轮数
+        denoise_mask_prob: 基因mask比例（用于VAE去噪训练）
+        denoise_mask_value: mask填充值（默认0）
 
     示例:
         >>> config = TrainingConfig(lr_embed=1e-3, batch_size=512)
@@ -125,6 +127,27 @@ class TrainingConfig:
     gradient_clip: float = 1.0
     beta_kl: float = 1.0
     warmup_epochs: int = 0
+    denoise_mask_prob: float = 0.0
+    denoise_mask_value: float = 0.0
+    n_epochs: Optional[int] = None
+    learning_rate: Optional[float] = None
+    beta: Optional[float] = None
+    lambda_edist: Optional[float] = None
+    lambda_spectral: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.n_epochs is not None:
+            self.n_epochs_embed = self.n_epochs
+            self.n_epochs_operator = self.n_epochs
+        if self.learning_rate is not None:
+            self.lr_embed = self.learning_rate
+            self.lr_operator = self.learning_rate
+        if self.beta is not None:
+            self.beta_kl = self.beta
+        if self.lambda_edist is not None:
+            self.lambda_e = self.lambda_edist
+        if self.lambda_spectral is not None:
+            self.lambda_stab = self.lambda_spectral
 
 
 @dataclass
@@ -156,15 +179,19 @@ class ConditionMeta:
         >>> print(cond.tissue)
         kidney
     """
-    dataset_id: str
-    tissue: str           # 'blood', 'kidney', 'brain', ...
-    perturbation: str     # drug / KO / 'LOY' / 'control'
-    timepoint: str        # 't0', 't1'
+    dataset_id: Optional[str] = None
+    tissue: Optional[str] = None           # 'blood', 'kidney', 'brain', ...
+    perturbation: Optional[str] = None     # drug / KO / 'LOY' / 'control'
+    timepoint: Optional[str] = None        # 't0', 't1'
     donor_id: Optional[str] = None
     mLOY_load: Optional[float] = None  # donor-level mLOY, range [0, 1]
     batch: Optional[str] = None
     age: Optional[int] = None
     disease_state: Optional[str] = None
+    perturbation_names: Optional[List[str]] = None
+    tissue_names: Optional[List[str]] = None
+    timepoint_names: Optional[List[str]] = None
+    batch_names: Optional[List[str]] = None
 
 
 @dataclass

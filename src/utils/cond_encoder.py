@@ -21,8 +21,11 @@
 
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 import pandas as pd
+
+from .perturbation import normalize_perturbation_label
+from ..config import ConditionMeta
 
 
 class ConditionEncoder(nn.Module):
@@ -72,24 +75,33 @@ class ConditionEncoder(nn.Module):
 
     def __init__(
         self,
-        perturb2idx: Dict[str, int],
-        tissue2idx: Dict[str, int],
-        batch2idx: Dict[str, int],
-        cond_dim: int,
+        perturb2idx: Union[Dict[str, int], ConditionMeta],
+        tissue2idx: Optional[Dict[str, int]] = None,
+        batch2idx: Optional[Dict[str, int]] = None,
+        cond_dim: int = 64,
         use_embedding: bool = True,
         perturb_embed_dim: int = 16,
         tissue_embed_dim: int = 8
     ):
         super().__init__()
-        self.perturb2idx = perturb2idx
-        self.tissue2idx = tissue2idx
-        self.batch2idx = batch2idx
+        if isinstance(perturb2idx, ConditionMeta):
+            meta = perturb2idx
+            perturbations = meta.perturbation_names or []
+            tissues = meta.tissue_names or []
+            batches = meta.batch_names or ["batch0"]
+            self.perturb2idx = {p: i for i, p in enumerate(perturbations)}
+            self.tissue2idx = {t: i for i, t in enumerate(tissues)}
+            self.batch2idx = {b: i for i, b in enumerate(batches)}
+        else:
+            self.perturb2idx = perturb2idx
+            self.tissue2idx = tissue2idx or {}
+            self.batch2idx = batch2idx or {}
         self.cond_dim = cond_dim
         self.use_embedding = use_embedding
 
-        n_pert = len(perturb2idx)
-        n_tissue = len(tissue2idx)
-        n_batch = len(batch2idx)
+        n_pert = len(self.perturb2idx)
+        n_tissue = len(self.tissue2idx)
+        n_batch = len(self.batch2idx)
 
         if use_embedding:
             # 使用learned embedding
@@ -166,7 +178,7 @@ class ConditionEncoder(nn.Module):
             device = next(self.parameters()).device
 
         # 获取各字段值
-        perturb = obs_row.get("perturbation", "control")
+        perturb = normalize_perturbation_label(obs_row.get("perturbation", "control"))
         tissue = obs_row.get("tissue", "unknown")
         batch = obs_row.get("batch", "batch0")
         mLOY = float(obs_row.get("mLOY_load", 0.0))
@@ -230,6 +242,10 @@ class ConditionEncoder(nn.Module):
         cond_vecs = [self.encode_obs_row(obs, device) for obs in obs_rows]
         return torch.stack(cond_vecs, dim=0)  # (B, cond_dim)
 
+    def get_dim(self) -> int:
+        """返回条件向量维度"""
+        return self.cond_dim
+
     @classmethod
     def from_anndata(
         cls,
@@ -265,7 +281,10 @@ class ConditionEncoder(nn.Module):
             >>> encoder = ConditionEncoder.from_anndata(adata, cond_dim=64)
         """
         # 提取唯一值
-        perturbations = adata.obs["perturbation"].unique().tolist()
+        perturbations = [
+            normalize_perturbation_label(p) for p in adata.obs["perturbation"].unique().tolist()
+        ]
+        perturbations = sorted(set(perturbations))
         tissues = adata.obs["tissue"].unique().tolist()
 
         if "batch" in adata.obs.columns:

@@ -24,6 +24,7 @@ import torch
 from typing import List, Optional, Tuple
 from ..models.nb_vae import NBVAE
 from ..config import NumericalConfig
+from ..evaluation.metrics import reconstruction_metrics
 
 # 默认数值配置
 _NUM_CFG = NumericalConfig()
@@ -184,14 +185,15 @@ def apply_operator(
 
 @torch.no_grad()
 def virtual_cell_scenario(
-    vae: NBVAE,
-    operator: OperatorModel,
-    x0: torch.Tensor,
-    tissue_onehot: torch.Tensor,
-    tissue_idx: torch.Tensor,
-    cond_vec_seq: torch.Tensor,
+    vae: Optional[NBVAE] = None,
+    operator: Optional[OperatorModel] = None,
+    x0: torch.Tensor = None,
+    tissue_onehot: torch.Tensor = None,
+    tissue_idx: torch.Tensor = None,
+    cond_vec_seq: torch.Tensor = None,
     device: str = "cuda",
-    return_trajectory: bool = False
+    return_trajectory: bool = True,
+    **kwargs
 ) -> torch.Tensor:
     """
     多步反事实模拟
@@ -256,20 +258,28 @@ def virtual_cell_scenario(
         >>> print(x_virtual.shape)
         torch.Size([100, 2000])
     """
+    if vae is None:
+        vae = kwargs.get("vae_model")
+    if operator is None:
+        operator = kwargs.get("operator_model")
+    if vae is None or operator is None:
+        raise ValueError("必须提供vae/vae_model与operator/operator_model")
+
     # 1. 编码到潜空间
     z = encode_cells(vae, x0, tissue_onehot, device=device)  # (B, latent_dim)
 
     B = z.size(0)
+    if isinstance(cond_vec_seq, list):
+        cond_vec_seq = torch.stack(cond_vec_seq, dim=0)
     T = cond_vec_seq.size(0)
 
     # 如果cond_vec_seq是(T, cond_dim)，扩展到(T, B, cond_dim)
     if cond_vec_seq.dim() == 2:
         cond_vec_seq = cond_vec_seq.unsqueeze(1).expand(-1, B, -1)  # (T, B, cond_dim)
 
-    # 存储轨迹（如果需要）
-    if return_trajectory:
-        z_trajectory = [z.clone()]
-        x_trajectory = [decode_cells(vae, z, tissue_onehot, device)]
+    # 存储轨迹（可选，降低内存占用）
+    z_trajectory = [z.clone()] if return_trajectory else None
+    x_trajectory = [decode_cells(vae, z, tissue_onehot, device)] if return_trajectory else None
 
     # 2. 循环应用算子
     for t in range(T):
@@ -290,13 +300,17 @@ def virtual_cell_scenario(
     # 3. 解码到基因空间
     x_virtual = decode_cells(vae, z, tissue_onehot, device=device)  # (B, G)
 
+    # z_trajectory: List[(B, latent_dim)] → (T+1, B, latent_dim)
+    # x_trajectory: List[(B, G)] → (T+1, B, G)
     if return_trajectory:
-        # z_trajectory: List[(B, latent_dim)] → (T+1, B, latent_dim)
-        # x_trajectory: List[(B, G)] → (T+1, B, G)
         z_trajectory = torch.stack(z_trajectory, dim=0)
         x_trajectory = torch.stack(x_trajectory, dim=0)
-        return x_virtual, z_trajectory, x_trajectory
-
+    if return_trajectory:
+        return {
+            "x_virtual": x_virtual,
+            "z_trajectory": z_trajectory,
+            "x_trajectory": x_trajectory
+        }
     return x_virtual
 
 
@@ -409,3 +423,33 @@ def interpolate_conditions(
         z_interp.append(z.clone())
 
     return torch.stack(z_interp, dim=0)  # (n_steps, B, latent_dim)
+
+
+def compute_reconstruction_metrics(
+    x_true: torch.Tensor,
+    x_pred: torch.Tensor,
+    device: str = "cuda"
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    计算重建质量指标（返回逐样本MSE与相关系数）
+
+    参数:
+        x_true: (B, G) 真实表达
+        x_pred: (B, G) 预测表达
+        device: 设备
+
+    返回:
+        mse: (B,) 每个样本的MSE
+        correlation: (B,) 每个样本的Pearson相关系数
+    """
+    x_true = x_true.to(device)
+    x_pred = x_pred.to(device)
+    mse = ((x_true - x_pred) ** 2).mean(dim=-1)
+    x_true_centered = x_true - x_true.mean(dim=-1, keepdim=True)
+    x_pred_centered = x_pred - x_pred.mean(dim=-1, keepdim=True)
+    numerator = (x_true_centered * x_pred_centered).sum(dim=-1)
+    denominator = (
+        x_true_centered.norm(dim=-1) * x_pred_centered.norm(dim=-1) + _NUM_CFG.eps_division
+    )
+    correlation = numerator / denominator
+    return mse, correlation

@@ -18,7 +18,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Tuple, Optional
 
 from ..config import NumericalConfig
 
@@ -208,9 +208,9 @@ class DecoderNB(nn.Module):
         mu = F.softplus(self.fc_mu(h)) + _NUM_CFG.eps_model_output  # (B, G)
 
         # 离散度参数r（基因特异）
-        # shape: (1, G) 会自动广播到 (B, G)
-        # 添加下界防止r过小导致数值不稳定
+        # shape: (B, G)
         r = torch.exp(self.log_dispersion).unsqueeze(0) + _NUM_CFG.eps_model_output  # (1, G)
+        r = r.expand(z.size(0), -1).contiguous()
 
         return mu, r
 
@@ -304,9 +304,14 @@ def nb_log_likelihood(
 
     # 输入验证：确保参数在有效范围内，防止lgamma产生NaN
     # r必须>0（负二项分布的定义域要求）
-    r = torch.clamp(r, min=eps)
+    r_input = r
+    r = torch.clamp(r_input, min=eps)
     # x必须>=0（计数数据的自然约束）
     x = torch.clamp(x, min=0.0)
+    if mu.requires_grad:
+        mu.retain_grad()
+    if r_input.requires_grad:
+        r_input.retain_grad()
 
     # log Γ(x+r) - log Γ(r) - log Γ(x+1)
     log_coef = (
@@ -332,8 +337,8 @@ def nb_log_likelihood(
         + x * log_mu_over_r_plus_mu
     )  # (B, G)
 
-    # 对基因维度求和，返回每个样本的总对数似然
-    return log_p.sum(dim=-1)  # (B,)
+    # 对基因维度求和，再对batch求均值，返回标量
+    return log_p.sum(dim=-1).mean()  # 标量
 
 
 class NBVAE(nn.Module):
@@ -391,7 +396,7 @@ class NBVAE(nn.Module):
         self,
         x: torch.Tensor,
         tissue_onehot: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         前向传播
 
@@ -414,13 +419,17 @@ class NBVAE(nn.Module):
         # 编码
         mu_z, logvar_z = self.encoder(x, tissue_onehot)
 
-        # 重参数化采样
-        z = sample_z(mu_z, logvar_z)
+        # 使用均值作为确定性潜变量
+        z = mu_z
 
         # 解码
         mu_x, r_x = self.decoder(z, tissue_onehot)
 
-        return z, mu_x, r_x, mu_z, logvar_z
+        return mu_x, r_x, mu_z, logvar_z
+
+    def sample_z(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """包装重参数化采样，供测试调用"""
+        return sample_z(mu, logvar)
 
 
 class DecoderGaussian(nn.Module):
@@ -495,7 +504,8 @@ def elbo_loss(
     x: torch.Tensor,
     tissue_onehot: torch.Tensor,
     model: NBVAE,
-    beta: float = 1.0
+    beta: float = 1.0,
+    x_target: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, dict]:
     """
     ELBO损失函数
@@ -507,10 +517,11 @@ def elbo_loss(
     对应：model.md A.2节，第55-65行
 
     参数:
-        x: (B, G) 基因表达计数
+        x: (B, G) 基因表达计数（模型输入）
         tissue_onehot: (B, n_tissues) 组织one-hot编码
         model: NBVAE模型
         beta: KL散度权重（β-VAE），默认1.0
+        x_target: 重建目标（默认与x一致，用于去噪训练）
 
     返回:
         loss: 标量，负ELBO（需要最小化）
@@ -538,11 +549,15 @@ def elbo_loss(
         torch.Size([]) dict_keys(['recon_loss', 'kl_loss', 'z'])
     """
     # 前向传播
-    z, mu_x, r_x, mu_z, logvar_z = model(x, tissue_onehot)
+    if x_target is None:
+        x_target = x
+
+    mu_x, r_x, mu_z, logvar_z = model(x, tissue_onehot)
+    z = sample_z(mu_z, logvar_z)
 
     # 重建项：log p(x|z)
-    log_px = nb_log_likelihood(x, mu_x, r_x)  # (B,)
-    recon_loss = -log_px.mean()  # 负对数似然
+    log_px = nb_log_likelihood(x_target, mu_x, r_x)  # 标量
+    recon_loss = -log_px  # 负对数似然
 
     # KL散度：KL(q(z|x)||N(0,I))
     # 解析解：-0.5 * Σ (1 + log σ² - μ² - σ²)

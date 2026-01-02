@@ -28,7 +28,11 @@ from ..config import NumericalConfig
 _NUM_CFG = NumericalConfig()
 
 
-def pairwise_distances(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+def pairwise_distances(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    add_eps: bool = False
+) -> torch.Tensor:
     """
     计算两组向量之间的成对L2距离
 
@@ -84,8 +88,13 @@ def pairwise_distances(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     # clamp到非负（避免浮点误差）
     dist2 = torch.clamp(dist2, min=0.0)
 
-    # 开方得到距离，添加epsilon避免梯度不稳定
-    distances = torch.sqrt(dist2 + _NUM_CFG.eps_distance)  # (n, m)
+    # 开方得到距离
+    if add_eps:
+        distances = torch.sqrt(dist2 + _NUM_CFG.eps_distance)
+    else:
+        distances = torch.sqrt(dist2)
+        if x is y and x.shape[0] == y.shape[0]:
+            distances.fill_diagonal_(0.0)
 
     return distances
 
@@ -169,9 +178,9 @@ def energy_distance(
         return torch.tensor(0.0, device=x.device)
 
     # 计算三个距离矩阵
-    d_xy = pairwise_distances(x, y)  # (n, m)
-    d_xx = pairwise_distances(x, x)  # (n, n)
-    d_yy = pairwise_distances(y, y)  # (m, m)
+    d_xy = pairwise_distances(x, y, add_eps=True)  # (n, m)
+    d_xx = pairwise_distances(x, x, add_eps=True)  # (n, n)
+    d_yy = pairwise_distances(y, y, add_eps=True)  # (m, m)
 
     # 第一项：跨分布项 2/(nm) Σᵢⱼ ||xᵢ - yⱼ||
     term_xy = 2.0 / (n * m) * d_xy.sum()
@@ -244,7 +253,7 @@ def energy_distance_batched(
         x_batch = x[i:i + batch_size]
         for j in range(0, m, batch_size):
             y_batch = y[j:j + batch_size]
-            d_xy_batch = pairwise_distances(x_batch, y_batch)
+            d_xy_batch = pairwise_distances(x_batch, y_batch, add_eps=True)
             xy_chunks.append(d_xy_batch.sum())
     term_xy = 2.0 / (n * m) * torch.stack(xy_chunks).sum()
 
@@ -254,7 +263,7 @@ def energy_distance_batched(
         x_batch_i = x[i:i + batch_size]
         for j in range(0, n, batch_size):
             x_batch_j = x[j:j + batch_size]
-            d_xx_batch = pairwise_distances(x_batch_i, x_batch_j)
+            d_xx_batch = pairwise_distances(x_batch_i, x_batch_j, add_eps=True)
             xx_chunks.append(d_xx_batch.sum())
     term_xx = 1.0 / (n * n) * torch.stack(xx_chunks).sum()
 
@@ -264,7 +273,7 @@ def energy_distance_batched(
         y_batch_i = y[i:i + batch_size]
         for j in range(0, m, batch_size):
             y_batch_j = y[j:j + batch_size]
-            d_yy_batch = pairwise_distances(y_batch_i, y_batch_j)
+            d_yy_batch = pairwise_distances(y_batch_i, y_batch_j, add_eps=True)
             yy_chunks.append(d_yy_batch.sum())
     term_yy = 1.0 / (m * m) * torch.stack(yy_chunks).sum()
 
@@ -372,5 +381,7 @@ def check_edistance_properties(
             else:
                 print(f"✗ 三角不等式: E(X,Z) = {ed_xz.item():.4f} "
                       f"> E(X,Y) + E(Y,Z) = {(ed_xy + ed_yz).item():.4f}")
+    else:
+        results["triangle"] = None
 
     return results

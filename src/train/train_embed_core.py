@@ -43,9 +43,9 @@ def train_embedding(
         checkpoint_path = Path(checkpoint_dir)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
     
-    history = {"train_loss": [], "train_recon": [], "train_kl": []}
+    history = {"train_loss": [], "train_recon": [], "train_kl": [], "train_recon_loss": [], "train_kl_loss": []}
     if val_loader is not None:
-        history.update({"val_loss": [], "val_recon": [], "val_kl": []})
+        history.update({"val_loss": [], "val_recon": [], "val_kl": [], "val_recon_loss": [], "val_kl_loss": []})
     
     best_val_loss = float("inf")
     
@@ -58,10 +58,25 @@ def train_embedding(
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.n_epochs_embed}")
         for batch in pbar:
-            x = batch["x"].to(device)
-            tissue_onehot = batch["tissue_onehot"].to(device)
-            
-            loss, loss_dict = loss_fn(x, tissue_onehot, model, beta=beta)
+            if isinstance(batch, (list, tuple)):
+                x = batch[0].to(device)
+                tissue_onehot = batch[1].to(device)
+            else:
+                x = batch["x"].to(device)
+                tissue_onehot = batch["tissue_onehot"].to(device)
+            x_input = x
+            if config.denoise_mask_prob > 0:
+                mask = torch.rand_like(x) < config.denoise_mask_prob
+                x_input = x.clone()
+                x_input[mask] = config.denoise_mask_value
+
+            loss, loss_dict = loss_fn(
+                x_input,
+                tissue_onehot,
+                model,
+                beta=beta,
+                x_target=x
+            )
 
             # 检测NaN/Inf：在backward前检查，便于诊断
             if torch.isnan(loss) or torch.isinf(loss):
@@ -100,6 +115,8 @@ def train_embedding(
         history["train_loss"].append(avg_train_loss)
         history["train_recon"].append(avg_train_recon)
         history["train_kl"].append(avg_train_kl)
+        history["train_recon_loss"].append(avg_train_recon)
+        history["train_kl_loss"].append(avg_train_kl)
         
         # 验证
         if val_loader is not None:
@@ -107,6 +124,8 @@ def train_embedding(
             history["val_loss"].append(val_metrics["loss"])
             history["val_recon"].append(val_metrics["recon_loss"])
             history["val_kl"].append(val_metrics["kl_loss"])
+            history["val_recon_loss"].append(val_metrics["recon_loss"])
+            history["val_kl_loss"].append(val_metrics["kl_loss"])
             
             logger.info(
                 f"Epoch {epoch+1} | Train: {avg_train_loss:.4f} | Val: {val_metrics['loss']:.4f}"
@@ -142,8 +161,12 @@ def validate_embedding(
     total_loss = total_recon = total_kl = n_samples = 0.0
     
     for batch in val_loader:
-        x = batch["x"].to(device)
-        tissue_onehot = batch["tissue_onehot"].to(device)
+        if isinstance(batch, (list, tuple)):
+            x = batch[0].to(device)
+            tissue_onehot = batch[1].to(device)
+        else:
+            x = batch["x"].to(device)
+            tissue_onehot = batch["tissue_onehot"].to(device)
         
         loss, loss_dict = loss_fn(x, tissue_onehot, model, beta=beta)
         
@@ -162,10 +185,12 @@ def validate_embedding(
 
 def save_checkpoint(model, optimizer, epoch, history, path):
     """保存checkpoint"""
+    last_loss = history["train_loss"][-1] if history.get("train_loss") else None
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
+        "loss": last_loss,
         "history": history,
         "model_config": {
             "n_genes": model.n_genes,
