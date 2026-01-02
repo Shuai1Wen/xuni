@@ -18,6 +18,7 @@ from ..models.nb_vae import NBVAE
 from ..models.operator import OperatorModel
 from ..utils.edistance import energy_distance_auto
 from ..config import TrainingConfig
+from ..utils.perturbation import normalize_perturbation_label
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,7 +76,9 @@ def train_operator(
     history = {
         "train_loss": [],
         "train_edist": [],
+        "train_edist_loss": [],
         "train_stab": [],
+        "train_spectral_penalty": [],
         "train_delta": [],
         "train_cons": []
     }
@@ -114,7 +117,9 @@ def train_operator(
             tissue_idx = batch["tissue_idx"].to(device)
             cond_vec = batch["cond_vec"].to(device)
             condition_id = batch["condition_id"].to(device)
-            perturbations = batch["perturbation"]
+            perturbations = [
+                normalize_perturbation_label(p) for p in batch["perturbation"]
+            ]
             
             if freeze_embed or config.finetune_scope == "none":
                 with torch.no_grad():
@@ -174,8 +179,11 @@ def train_operator(
             )
             gate_penalty = torch.tensor(0.0, device=z0.device)
             if config.lambda_gate_control > 0 and config.control_perturbations:
+                control_set = {
+                    normalize_perturbation_label(p) for p in config.control_perturbations
+                }
                 control_mask = torch.tensor(
-                    [p in config.control_perturbations for p in perturbations],
+                    [p in control_set for p in perturbations],
                     device=z0.device,
                     dtype=torch.bool
                 )
@@ -225,7 +233,9 @@ def train_operator(
         
         history["train_loss"].append(avg_train_loss)
         history["train_edist"].append(avg_train_edist)
+        history["train_edist_loss"].append(avg_train_edist)
         history["train_stab"].append(avg_train_stab)
+        history["train_spectral_penalty"].append(avg_train_stab)
         history["train_delta"].append(avg_train_delta)
         history["train_cons"].append(avg_train_cons)
         

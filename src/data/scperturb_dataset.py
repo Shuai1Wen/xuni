@@ -16,10 +16,11 @@ scPerturb数据加载器
 """
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, random_split
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 from ..utils.cond_encoder import ConditionEncoder
+from ..utils.perturbation import normalize_perturbation_label
 
 
 class SCPerturbEmbedDataset(Dataset):
@@ -173,6 +174,10 @@ class SCPerturbPairDataset(Dataset):
 
         # 按条件分组
         # 条件键：(dataset_id, tissue, cell_type, perturbation)
+        if "perturbation_norm" not in self.adata.obs.columns:
+            self.adata.obs["perturbation_norm"] = self.adata.obs["perturbation"].map(
+                normalize_perturbation_label
+            )
         obs_df = self.adata.obs
 
         # 确保需要的列存在
@@ -183,9 +188,9 @@ class SCPerturbPairDataset(Dataset):
 
         # 按条件分组
         if "cell_type" in obs_df.columns:
-            group_keys = ["dataset_id", "tissue", "cell_type", "perturbation"]
+            group_keys = ["dataset_id", "tissue", "cell_type", "perturbation_norm"]
         else:
-            group_keys = ["dataset_id", "tissue", "perturbation"]
+            group_keys = ["dataset_id", "tissue", "perturbation_norm"]
 
         grouped = obs_df.groupby(group_keys)
 
@@ -216,6 +221,9 @@ class SCPerturbPairDataset(Dataset):
             )
             for i0, i1 in zip(t0_sampled, t1_sampled):
                 obs_dict = obs_df.iloc[self.adata.obs.index.get_loc(i0)].to_dict()
+                obs_dict["perturbation"] = normalize_perturbation_label(
+                    obs_dict.get("perturbation", "control")
+                )
                 pairs.append((
                     self.adata.obs.index.get_loc(i0),  # AnnData内部索引
                     self.adata.obs.index.get_loc(i1),
@@ -280,7 +288,9 @@ class SCPerturbPairDataset(Dataset):
             "tissue_idx": torch.tensor(t_idx, dtype=torch.long),  # 标量
             "cond_vec": cond_vec,                             # (cond_dim,)
             "condition_id": torch.tensor(condition_id, dtype=torch.long),
-            "perturbation": obs_dict["perturbation"]
+            "perturbation": obs_dict["perturbation"],
+            "tissue": obs_dict.get("tissue", "unknown"),
+            "cell_type": obs_dict.get("cell_type", "unknown")
         }
 
 
@@ -326,5 +336,75 @@ def collate_fn_pair(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "tissue_idx": torch.stack([item["tissue_idx"] for item in batch]),  # (B,)
         "cond_vec": torch.stack([item["cond_vec"] for item in batch]),  # (B, cond_dim)
         "condition_id": torch.stack([item["condition_id"] for item in batch]),  # (B,)
-        "perturbation": [item["perturbation"] for item in batch]
+        "perturbation": [item["perturbation"] for item in batch],
+        "tissue": [item["tissue"] for item in batch],
+        "cell_type": [item["cell_type"] for item in batch]
     }
+
+
+def create_dataloaders(
+    adata,
+    cond_encoder: ConditionEncoder,
+    tissue2idx: Dict[str, int],
+    batch_size: int = 128,
+    val_split: float = 0.1,
+    seed: int = 42,
+    max_pairs_per_condition: int = 500,
+    num_workers: int = 0,
+    shuffle: bool = True
+) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """
+    构建训练/验证 DataLoader
+
+    参数:
+        adata: AnnData对象
+        cond_encoder: 条件编码器
+        tissue2idx: 组织映射
+        batch_size: 批次大小
+        val_split: 验证集比例（0表示不划分）
+        seed: 随机种子
+        max_pairs_per_condition: 每个条件最大配对数
+        num_workers: DataLoader线程数
+        shuffle: 是否打乱训练集
+
+    返回:
+        train_loader, val_loader
+    """
+    dataset = SCPerturbPairDataset(
+        adata=adata,
+        cond_encoder=cond_encoder,
+        tissue2idx=tissue2idx,
+        max_pairs_per_condition=max_pairs_per_condition,
+        seed=seed
+    )
+    if val_split <= 0:
+        train_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            collate_fn=collate_fn_pair
+        )
+        return train_loader, None
+
+    val_size = int(len(dataset) * val_split)
+    train_size = len(dataset) - val_size
+    generator = torch.Generator().manual_seed(seed)
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_fn_pair
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn_pair
+    )
+
+    return train_loader, val_loader

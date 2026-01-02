@@ -95,9 +95,9 @@ class OperatorModel(nn.Module):
         # A_t^(0)：组织特异的基线转移矩阵
         # 初始化接近单位阵（表示无扰动时状态基本不变）
         self.A0_tissue = nn.Parameter(torch.zeros(n_tissues, latent_dim, latent_dim))
-        # 初始化为单位阵
+        # 初始化为单位阵 + 微小扰动，确保不同组织基线可区分
         for t in range(n_tissues):
-            self.A0_tissue.data[t] = torch.eye(latent_dim)
+            self.A0_tissue.data[t] = torch.eye(latent_dim) + torch.randn(latent_dim, latent_dim) * 1e-2
 
         # b_t^(0)：组织特异的基线平移
         # 初始化为0（表示无扰动时无偏移）
@@ -184,10 +184,10 @@ class OperatorModel(nn.Module):
 
         # 1. 计算响应基的激活系数
         # α_k(θ): (B, K) - 线性响应基的权重
-        alpha = F.softmax(self.alpha_mlp(cond_vec), dim=-1)  # (B, K)
+        alpha = self.alpha_mlp(cond_vec)  # (B, K)
 
         # β_k(θ): (B, K) - 平移响应基的权重
-        beta = F.softmax(self.beta_mlp(cond_vec), dim=-1)    # (B, K)
+        beta = self.beta_mlp(cond_vec)    # (B, K)
 
         # 2. 获取对应组织的基线算子
         # A_t^(0): (B, d, d)
@@ -219,10 +219,8 @@ class OperatorModel(nn.Module):
         # 最终平移：b_θ = b_t^(0) + Σ β_k u_k
         b_theta = b0 + b_res  # (B, d)
 
-        # 5. 残差 + 门控：z_out = z + g * (A_θz + b_θ)
-        gate = torch.sigmoid(self.gate_mlp(cond_vec)).squeeze(-1)  # (B,)
-        delta = torch.bmm(A_theta, z.unsqueeze(-1)).squeeze(-1) + b_theta  # (B, d)
-        z_out = z + gate.unsqueeze(-1) * delta  # (B, d)
+        # 5. 应用算子：z_out = A_θz + b_θ
+        z_out = torch.bmm(A_theta, z.unsqueeze(-1)).squeeze(-1) + b_theta  # (B, d)
 
         return z_out, A_theta, b_theta
 
@@ -439,7 +437,7 @@ class OperatorModel(nn.Module):
     def compute_operator_norm(
         self,
         tissue_idx: torch.Tensor,
-        cond_vec: torch.Tensor,
+        cond_vec: Optional[torch.Tensor] = None,
         norm_type: str = "spectral",
         n_iterations: int = 10
     ) -> torch.Tensor:
@@ -470,18 +468,24 @@ class OperatorModel(nn.Module):
             >>> print(norms.mean(), norms.max())
             tensor(1.0234) tensor(1.0567)
         """
-        B = tissue_idx.size(0)
+        if cond_vec is None and tissue_idx.dim() == 3:
+            A_theta = tissue_idx
+            B = A_theta.size(0)
+        else:
+            if cond_vec is None:
+                raise ValueError("计算算子范数需要cond_vec或直接提供A_theta")
+            B = tissue_idx.size(0)
 
-        # 直接构造A_θ，无需完整前向传播（优化版）
-        # 1. 计算响应基系数
-        alpha = self.alpha_mlp(cond_vec)  # (B, K)
+            # 直接构造A_θ，无需完整前向传播（优化版）
+            # 1. 计算响应基系数
+            alpha = self.alpha_mlp(cond_vec)  # (B, K)
 
-        # 2. 获取基线算子
-        A0 = self.A0_tissue[tissue_idx]  # (B, d, d)
+            # 2. 获取基线算子
+            A0 = self.A0_tissue[tissue_idx]  # (B, d, d)
 
-        # 3. 组合响应基：A_θ = A_t^(0) + Σ_k α_k(θ) B_k
-        A_res = torch.einsum('bk,kij->bij', alpha, self.B)  # (B, d, d)
-        A_theta = A0 + A_res  # (B, d, d)
+            # 3. 组合响应基：A_θ = A_t^(0) + Σ_k α_k(θ) B_k
+            A_res = torch.einsum('bk,kij->bij', alpha, self.B)  # (B, d, d)
+            A_theta = A0 + A_res  # (B, d, d)
 
         if norm_type == "frobenius":
             # Frobenius范数：||A||_F = sqrt(Σᵢⱼ A²ᵢⱼ)

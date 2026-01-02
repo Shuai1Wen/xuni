@@ -184,6 +184,8 @@ def perturbation_shift_metrics(
 ) -> Dict[str, float]:
     """
     计算Systema风格的扰动特异shift指标（Δ与Δ20）
+
+    Δ20必须基于训练集统计的top genes，若未提供则返回NaN以避免信息泄漏。
     """
     x0_np = x0.cpu().numpy()
     x1_true_np = x1_true.cpu().numpy()
@@ -211,18 +213,18 @@ def perturbation_shift_metrics(
 
         if top_genes_by_perturbation and pert in top_genes_by_perturbation:
             top_idx = top_genes_by_perturbation[pert]
+            corr20, _ = pearsonr(delta_true[top_idx], delta_pred[top_idx])
         else:
-            top_idx = np.argsort(np.abs(delta_true))[-top_k:]
-        corr20, _ = pearsonr(delta_true[top_idx], delta_pred[top_idx])
+            corr20 = np.nan
         corr_top.append(corr20)
         per_perturbation[pert] = {
             "pearson_delta": float(corr),
-            "pearson_delta20": float(corr20)
+            "pearson_delta20": float(corr20) if not np.isnan(corr20) else np.nan
         }
 
     return {
         "pearson_delta_mean": float(np.mean(corr_all)) if corr_all else 0.0,
-        "pearson_delta20_mean": float(np.mean(corr_top)) if corr_top else 0.0,
+        "pearson_delta20_mean": float(np.nanmean(corr_top)) if corr_top else np.nan,
         "per_perturbation": per_perturbation
     }
 

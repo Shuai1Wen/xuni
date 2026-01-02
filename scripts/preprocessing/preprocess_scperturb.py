@@ -24,6 +24,9 @@ import scanpy as sc
 import numpy as np
 from pathlib import Path
 import json
+import re
+
+from src.utils.perturbation import normalize_perturbation_label
 
 
 def quality_control(adata, min_genes=200, min_cells=100):
@@ -158,6 +161,126 @@ def split_data_by_condition(adata, test_split=0.15, val_split=0.15, seed=42):
     return adata_train, adata_val, adata_test
 
 
+def _parse_perturbation_components(label: str) -> tuple:
+    """解析组合扰动的组成部分"""
+    normalized = normalize_perturbation_label(label)
+    if normalized == "control":
+        return ("control",)
+    parts = [p for p in re.split(r"[+,&;|]+", normalized) if p.strip()]
+    return tuple(sorted(p.strip() for p in parts)) if parts else (normalized,)
+
+
+def split_data_systema(
+    adata,
+    test_split=0.15,
+    val_split=0.15,
+    seed=42,
+    combo_unseen_mode: str = "strict"
+):
+    """
+    Systema风格划分策略
+
+    1) 扰动级别unseen split（单扰动）
+    2) 组合扰动按组合阶数分层
+    3) control样本按细胞级随机划分
+    """
+    print(
+        f"\nSystema划分（测试集={test_split}, 验证集={val_split}, "
+        f"组合模式={combo_unseen_mode}）..."
+    )
+
+    rng = np.random.default_rng(seed)
+
+    if "perturbation_norm" not in adata.obs.columns:
+        adata.obs["perturbation_norm"] = adata.obs["perturbation"].map(
+            normalize_perturbation_label
+        )
+
+    perturbation_labels = adata.obs["perturbation_norm"].unique().tolist()
+    perturbation_components = {
+        p: _parse_perturbation_components(p) for p in perturbation_labels
+    }
+    perturbation_sizes = {
+        p: len(components) for p, components in perturbation_components.items()
+    }
+
+    control_label = "control"
+    control_mask = adata.obs["perturbation_norm"] == control_label
+
+    single_perts = [p for p in perturbation_labels if perturbation_sizes[p] == 1 and p != control_label]
+    combo_perts = [p for p in perturbation_labels if perturbation_sizes[p] > 1]
+
+    rng.shuffle(single_perts)
+    n_single = len(single_perts)
+    n_single_test = int(n_single * test_split)
+    n_single_val = int(n_single * val_split)
+
+    single_test = set(single_perts[:n_single_test])
+    single_val = set(single_perts[n_single_test:n_single_test + n_single_val])
+    single_train = set(single_perts[n_single_test + n_single_val:])
+
+    combo_train, combo_val, combo_test = set(), set(), set()
+    combo_sizes = sorted({perturbation_sizes[p] for p in combo_perts})
+    for size in combo_sizes:
+        perts_of_size = [p for p in combo_perts if perturbation_sizes[p] == size]
+        if not perts_of_size:
+            continue
+        if combo_unseen_mode == "strict":
+            eligible = []
+            for pert in perts_of_size:
+                components = set(perturbation_components[pert])
+                if components.issubset(single_train):
+                    eligible.append(pert)
+                else:
+                    combo_train.add(pert)
+            perts_of_size = eligible
+        rng.shuffle(perts_of_size)
+        n_combo = len(perts_of_size)
+        n_combo_test = int(n_combo * test_split)
+        n_combo_val = int(n_combo * val_split)
+        combo_test.update(perts_of_size[:n_combo_test])
+        combo_val.update(perts_of_size[n_combo_test:n_combo_test + n_combo_val])
+        combo_train.update(perts_of_size[n_combo_test + n_combo_val:])
+
+    train_perts = single_train | combo_train
+    val_perts = single_val | combo_val
+    test_perts = single_test | combo_test
+
+    train_mask = adata.obs["perturbation_norm"].isin(train_perts)
+    val_mask = adata.obs["perturbation_norm"].isin(val_perts)
+    test_mask = adata.obs["perturbation_norm"].isin(test_perts)
+
+    # control样本按细胞级随机划分，确保三份数据都包含对照
+    control_indices = adata.obs[control_mask].index.to_numpy()
+    rng.shuffle(control_indices)
+    n_control = len(control_indices)
+    n_control_test = int(n_control * test_split)
+    n_control_val = int(n_control * val_split)
+    control_test_idx = set(control_indices[:n_control_test])
+    control_val_idx = set(control_indices[n_control_test:n_control_test + n_control_val])
+    control_train_idx = set(control_indices[n_control_test + n_control_val:])
+
+    control_mask_train = adata.obs.index.isin(control_train_idx)
+    control_mask_val = adata.obs.index.isin(control_val_idx)
+    control_mask_test = adata.obs.index.isin(control_test_idx)
+
+    train_mask = train_mask | control_mask_train
+    val_mask = val_mask | control_mask_val
+    test_mask = test_mask | control_mask_test
+
+    adata_train = adata[train_mask].copy()
+    adata_val = adata[val_mask].copy()
+    adata_test = adata[test_mask].copy()
+
+    print(f"  单扰动train/val/test: {len(single_train)}/{len(single_val)}/{len(single_test)}")
+    print(f"  组合扰动train/val/test: {len(combo_train)}/{len(combo_val)}/{len(combo_test)}")
+    print(f"  训练集: {adata_train.n_obs} 细胞")
+    print(f"  验证集: {adata_val.n_obs} 细胞")
+    print(f"  测试集: {adata_test.n_obs} 细胞")
+
+    return adata_train, adata_val, adata_test
+
+
 def save_datasets(adata_train, adata_val, adata_test, output_dir):
     """
     保存数据集
@@ -251,6 +374,20 @@ def main():
         default=42,
         help="随机种子（默认42）"
     )
+    parser.add_argument(
+        "--split_strategy",
+        type=str,
+        choices=["condition", "systema"],
+        default="systema",
+        help="数据划分策略（condition或systema，默认systema）"
+    )
+    parser.add_argument(
+        "--combo_unseen_mode",
+        type=str,
+        choices=["strict", "relaxed"],
+        default="strict",
+        help="组合扰动划分模式（strict保证单扰动在训练集中出现）"
+    )
 
     args = parser.parse_args()
 
@@ -280,12 +417,21 @@ def main():
     adata = select_highly_variable_genes(adata, n_top_genes=args.n_top_genes)
 
     # 划分数据集
-    adata_train, adata_val, adata_test = split_data_by_condition(
-        adata,
-        test_split=args.test_split,
-        val_split=args.val_split,
-        seed=args.seed
-    )
+    if args.split_strategy == "systema":
+        adata_train, adata_val, adata_test = split_data_systema(
+            adata,
+            test_split=args.test_split,
+            val_split=args.val_split,
+            seed=args.seed,
+            combo_unseen_mode=args.combo_unseen_mode
+        )
+    else:
+        adata_train, adata_val, adata_test = split_data_by_condition(
+            adata,
+            test_split=args.test_split,
+            val_split=args.val_split,
+            seed=args.seed
+        )
 
     # 保存数据集
     save_datasets(adata_train, adata_val, adata_test, args.output)
